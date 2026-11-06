@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Saathi</string>
+    <string name="media_listener_label">Saathi sound finder</string>
+    <string name="accessibility_description">Saathi reads the screen of a few allowed apps only while helping you, then points at the button and speaks the next step. It never taps, types or swipes for you. It never reads WhatsApp, messages, email or bank apps, and it hides on PIN, OTP and password screens.</string>
+</resources>

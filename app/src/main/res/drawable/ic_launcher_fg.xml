@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- hair bun -->
+    <path android:fillColor="#2E1C14" android:pathData="M54,20a9,9 0 1,1 -0.01,0z" />
+    <!-- hair -->
+    <path android:fillColor="#2E1C14" android:pathData="M30,56a24,26 0 1,1 48,0l0,6l-48,0z" />
+    <!-- face -->
+    <path android:fillColor="#C98A5E" android:pathData="M54,36a20,23 0 1,1 -0.01,0z" />
+    <!-- eyes -->
+    <path android:fillColor="#2E1C14" android:pathData="M46,52a2.8,3.4 0 1,1 -0.01,0z" />
+    <path android:fillColor="#2E1C14" android:pathData="M62,52a2.8,3.4 0 1,1 -0.01,0z" />
+    <!-- bindi -->
+    <path android:fillColor="#C8102E" android:pathData="M54,44a2,2 0 1,1 -0.01,0z" />
+    <!-- smile -->
+    <path
+        android:pathData="M46,66q8,8 16,0"
+        android:strokeWidth="2.6"
+        android:strokeColor="#7A2E1D"
+        android:strokeLineCap="round" />
+</vector>
