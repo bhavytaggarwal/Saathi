@@ -13,6 +13,8 @@ import android.os.Handler
 import android.os.Looper
 import android.speech.ModelDownloadListener
 import android.speech.RecognitionListener
+import android.speech.RecognitionSupport
+import android.speech.RecognitionSupportCallback
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
@@ -25,28 +27,46 @@ import java.util.UUID
 /** Hindi speech in and out. The microphone is open only between listen() and its result. */
 class VoiceIO(context: Context, private val prefs: Prefs) {
     interface Listener {
+        fun onReady()
         fun onPartial(text: String)
         fun onHeard(text: String)
         fun onNothingHeard()
         fun onRecognizerUnavailable()
+        fun onHindiPackMissing()
     }
+
+    enum class HindiPack { INSTALLED, DOWNLOADING, NOT_INSTALLED, NOT_SUPPORTED, UNKNOWN }
 
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
     private val hindi = Locale.forLanguageTag("hi-IN")
+    // Media volume, not the separate assistant volume, which can sit near zero and which the
+    // volume buttons she knows do not normally change.
+    private val speechAttributes = AudioAttributes.Builder()
+        .setUsage(AudioAttributes.USAGE_MEDIA)
+        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+        .build()
     private val audio = appContext.getSystemService(AudioManager::class.java)
     private val focusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_MAY_DUCK)
-        .setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-        ).build()
+        .setAudioAttributes(speechAttributes)
+        .build()
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private val callbacks = HashMap<String, () -> Unit>()
     private var recognizer: SpeechRecognizer? = null
+
+    // The mic must always close. Recognizers can ignore the silence settings, so these enforce it.
+    private var lastPartial = ""
+    private var activeListener: Listener? = null
+    private var retried = false
+    private val noSpeech = Runnable {
+        val listener = activeListener
+        stopListening()
+        listener?.onNothingHeard()
+    }
+    private val endOfSpeech = Runnable { finishWithWhatWasHeard() }
+    private val retry = Runnable { activeListener?.let(::openBestRecognizer) }
 
     var onSpeakingChanged: ((Boolean) -> Unit)? = null
 
@@ -62,12 +82,7 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
     private fun configureTts() {
         val engine = tts ?: return
         engine.language = hindi
-        engine.setAudioAttributes(
-            AudioAttributes.Builder()
-                .setUsage(AudioAttributes.USAGE_ASSISTANT)
-                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                .build()
-        )
+        engine.setAudioAttributes(speechAttributes)
         pickVoice()?.let { engine.voice = it }
         engine.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
             override fun onStart(utteranceId: String) {
@@ -163,10 +178,25 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         get() = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
             SpeechRecognizer.isOnDeviceRecognitionAvailable(appContext)
 
+    val isListening: Boolean
+        get() = recognizer != null
+
     /** Opens the mic once. Her voice stays on the phone unless online speech was enabled in setup. */
     fun listen(listener: Listener) {
         stopListening()
         stopSpeaking()
+        retried = false
+        openBestRecognizer(listener)
+    }
+
+    private fun finishWithWhatWasHeard() {
+        val listener = activeListener
+        val heard = lastPartial.trim()
+        stopListening()
+        if (heard.isEmpty()) listener?.onNothingHeard() else listener?.onHeard(heard)
+    }
+
+    private fun openBestRecognizer(listener: Listener) {
         if (isOnDeviceAvailable) {
             start(createOnDevice(), onDevice = true, listener)
         } else if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S || prefs.allowOnlineSpeech) {
@@ -197,39 +227,73 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
 
     private fun start(speech: SpeechRecognizer, onDevice: Boolean, listener: Listener) {
         recognizer = speech
+        activeListener = listener
+        lastPartial = ""
+        main.postDelayed(noSpeech, NO_SPEECH_MS)
         speech.setRecognitionListener(object : RecognitionListener {
             override fun onResults(results: Bundle) {
                 val heard = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.trim().orEmpty()
+                    ?.firstOrNull()?.trim().orEmpty().ifEmpty { lastPartial.trim() }
                 stopListening()
                 if (heard.isEmpty()) listener.onNothingHeard() else listener.onHeard(heard)
             }
 
             override fun onPartialResults(partial: Bundle) {
-                partial.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.takeIf { it.isNotBlank() }?.let(listener::onPartial)
+                val text = partial.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.takeIf { it.isNotBlank() } ?: return
+                main.removeCallbacks(noSpeech)
+                if (text != lastPartial) {
+                    lastPartial = text
+                    listener.onPartial(text)
+                    // A pause this long after her last new word means she has finished.
+                    main.removeCallbacks(endOfSpeech)
+                    main.postDelayed(endOfSpeech, END_OF_SPEECH_MS)
+                }
             }
 
             override fun onError(error: Int) {
                 Log.w(TAG, "recognizer error $error onDevice=$onDevice")
+                val heardSoFar = lastPartial.trim()
                 stopListening()
+                activeListener = listener
+                if (heardSoFar.isNotEmpty()) {
+                    activeListener = null
+                    listener.onHeard(heardSoFar)
+                    return
+                }
                 when (error) {
+                    // The speech service dropped out. She should not have to tap again for that.
+                    SpeechRecognizer.ERROR_SERVER_DISCONNECTED, SpeechRecognizer.ERROR_RECOGNIZER_BUSY,
+                    SpeechRecognizer.ERROR_CLIENT -> {
+                        if (retried) {
+                            activeListener = null
+                            listener.onRecognizerUnavailable()
+                        } else {
+                            retried = true
+                            main.postDelayed(retry, RETRY_MS)
+                        }
+                    }
                     SpeechRecognizer.ERROR_NO_MATCH, SpeechRecognizer.ERROR_SPEECH_TIMEOUT ->
                         listener.onNothingHeard()
                     ERROR_LANGUAGE_NOT_SUPPORTED, ERROR_LANGUAGE_UNAVAILABLE -> {
-                        if (onDevice) downloadHindiPack()
+                        // The download belongs in setup. A size prompt in the middle of her
+                        // question would only confuse her.
                         if (onDevice && prefs.allowOnlineSpeech && SpeechRecognizer.isRecognitionAvailable(appContext)) {
                             start(SpeechRecognizer.createSpeechRecognizer(appContext), onDevice = false, listener)
                         } else {
-                            listener.onRecognizerUnavailable()
+                            listener.onHindiPackMissing()
                         }
                     }
                     else -> listener.onRecognizerUnavailable()
                 }
             }
 
-            override fun onReadyForSpeech(params: Bundle?) = Unit
-            override fun onBeginningOfSpeech() = Unit
+            override fun onReadyForSpeech(params: Bundle?) = listener.onReady()
+            override fun onBeginningOfSpeech() {
+                main.removeCallbacks(noSpeech)
+                // If no words ever arrive, the mic still closes.
+                main.postDelayed(noSpeech, MAX_SPEECH_MS)
+            }
             override fun onRmsChanged(rmsdB: Float) = Unit
             override fun onBufferReceived(buffer: ByteArray?) = Unit
             override fun onEndOfSpeech() = Unit
@@ -238,7 +302,49 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         speech.startListening(recognizerIntent())
     }
 
-    /** Asks the phone to fetch the on-device Hindi pack. Setup calls this as well. */
+    /** Asks Android, without opening the mic, whether the on-device Hindi pack is ready. */
+    fun checkHindiPack(onResult: (HindiPack) -> Unit) {
+        if (!isOnDeviceAvailable) {
+            onResult(HindiPack.NOT_SUPPORTED)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            onResult(HindiPack.UNKNOWN)
+            return
+        }
+        val checker = createOnDevice()
+        val finish = { state: HindiPack ->
+            main.post {
+                checker.destroy()
+                Log.i(TAG, "hindi pack: $state")
+                onResult(state)
+            }
+            Unit
+        }
+        checker.checkRecognitionSupport(
+            recognizerIntent(),
+            appContext.mainExecutor,
+            object : RecognitionSupportCallback {
+                override fun onSupportResult(support: RecognitionSupport) {
+                    fun List<String>.hasHindi() = any { it.lowercase().startsWith("hi") }
+                    finish(
+                        when {
+                            support.installedOnDeviceLanguages.hasHindi() -> HindiPack.INSTALLED
+                            support.pendingOnDeviceLanguages.hasHindi() -> HindiPack.DOWNLOADING
+                            support.supportedOnDeviceLanguages.hasHindi() -> HindiPack.NOT_INSTALLED
+                            else -> HindiPack.NOT_SUPPORTED
+                        }
+                    )
+                }
+
+                override fun onError(error: Int) {
+                    finish(HindiPack.UNKNOWN)
+                }
+            },
+        )
+    }
+
+    /** Asks the phone to fetch the on-device Hindi pack. Only setup calls this. */
     fun downloadHindiPack(onFinished: ((Boolean) -> Unit)? = null) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || !isOnDeviceAvailable) {
             onFinished?.invoke(false)
@@ -276,6 +382,11 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
     }
 
     fun stopListening() {
+        main.removeCallbacks(noSpeech)
+        main.removeCallbacks(endOfSpeech)
+        main.removeCallbacks(retry)
+        activeListener = null
+        lastPartial = ""
         recognizer?.let {
             runCatching { it.cancel() }
             runCatching { it.destroy() }
@@ -292,6 +403,10 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
 
     private companion object {
         const val TAG = "SaathiVoice"
+        const val NO_SPEECH_MS = 9_000L
+        const val END_OF_SPEECH_MS = 2_500L
+        const val MAX_SPEECH_MS = 25_000L
+        const val RETRY_MS = 400L
         const val ERROR_LANGUAGE_NOT_SUPPORTED = 12
         const val ERROR_LANGUAGE_UNAVAILABLE = 13
     }

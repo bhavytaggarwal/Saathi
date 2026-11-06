@@ -70,6 +70,21 @@ class PrivacyFilterTest {
         assertTrue(PrivacyFilter.hasSecret(keypad))
     }
 
+    @Test fun clockAndCalculatorKeepNumberPadsButStillHideOnRealSecrets() {
+        val keypad = (0..9).map { NodeFacts(text = it.toString(), isClickable = true) }
+        listOf("com.android.deskclock", "com.vivo.calculator").forEach { pkg ->
+            assertTrue(pkg, Allowlist.isAllowed(pkg))
+            assertTrue(pkg, Allowlist.hasOrdinaryNumberPad(pkg))
+        }
+        assertFalse(PrivacyFilter.hasSecret(keypad, numberPadMeansSecret = false))
+        assertTrue(PrivacyFilter.hasSecret(keypad + NodeFacts(text = "Enter PIN"), numberPadMeansSecret = false))
+        assertTrue(PrivacyFilter.hasSecret(listOf(NodeFacts(isPassword = true)), numberPadMeansSecret = false))
+        // Maps and every other app keep the full check.
+        assertTrue(Allowlist.isAllowed("com.google.android.apps.maps"))
+        assertFalse(Allowlist.hasOrdinaryNumberPad("com.google.android.apps.maps"))
+        assertFalse(Allowlist.hasOrdinaryNumberPad(Allowlist.GPAY))
+    }
+
     @Test fun staysVisibleOnOrdinaryScreens() {
         val screen = listOf(
             NodeFacts(text = "Add bank account", isClickable = true),

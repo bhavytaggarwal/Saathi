@@ -37,6 +37,10 @@ class MainActivity : Activity() {
     private lateinit var geminiStatus: TextView
     private lateinit var voiceStatus: TextView
     private var voiceNames: List<String> = emptyList()
+    private lateinit var packStatus: TextView
+    private lateinit var packButton: View
+    private var packChecksLeft = 0
+    private val packPoll = Runnable { refreshPack() }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -52,6 +56,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        packStatus.removeCallbacks(packPoll)
         voice.shutdown()
         super.onDestroy()
     }
@@ -103,14 +108,7 @@ class MainActivity : Activity() {
                 }) { startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)) }
             )
         }
-        root.addView(
-            step(
-                "Sound finder (optional)",
-                "Android only tells apps which app is playing media through Notification access. Saathi's listener exists for that alone and never reads a notification. Without it, she can still close the sound from recent apps.",
-                "Open Notification access",
-                done = { phone.hasMediaAccess },
-            ) { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) }
-        )
+        root.addView(soundFinderCard())
 
         root.addView(heading("2. Stop the phone from killing Saathi"))
         root.addView(
@@ -121,13 +119,15 @@ class MainActivity : Activity() {
                 startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
             }
         )
-        autoStartIntent()?.let { intent ->
+        val autoStart = autoStartIntents()
+        if (autoStart.isNotEmpty()) {
             root.addView(
-                step("Auto-start (${Build.MANUFACTURER})", "This phone has its own auto-start list. Turn Saathi on there too.", "Open auto-start", done = null) {
-                    runCatching { startActivity(intent) }.onFailure {
-                        Toast.makeText(this, "Not found. Look for Autostart in the phone's Settings.", Toast.LENGTH_LONG).show()
-                    }
-                }
+                step(
+                    "Auto-start (${Build.MANUFACTURER})",
+                    "This phone may stop Saathi in the background. Allow auto-start or background activity for Saathi. If App info opens instead, look under Battery there. If the phone has no such setting, the Battery step above is enough.",
+                    "Open auto-start",
+                    done = null,
+                ) { openAutoStart(autoStart) }
             )
         }
 
@@ -145,6 +145,28 @@ class MainActivity : Activity() {
             primaryButton("Open lists and reminders") { startActivity(Intent(this, ListsActivity::class.java)) },
             wrapWithGap(4),
         )
+    }
+
+    private fun soundFinderCard(): View {
+        val card = step(
+            "Sound finder (optional)",
+            "Lets Saathi name the app playing a sound. Android requires Notification access for this and will warn that it can read notifications. Saathi never reads them, and conversations (SMS and chats) start switched off. Leave them off. Turning them on in Android's settings is at your own risk and adds nothing to Saathi.",
+            "Open Notification access",
+            done = { phone.hasMediaAccess },
+        ) { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } as LinearLayout
+        val result = body("")
+        card.addView(
+            primaryButton("Test: what is playing now?", 0xFF5C6B73.toInt()) {
+                result.text = when (val sound = phone.whichAppIsPlaying()) {
+                    is PhoneHelp.Sound.FromApp -> "✅ Sound is coming from ${sound.label}."
+                    PhoneHelp.Sound.UnknownApp -> "Sound is playing, but Android did not say which app."
+                    PhoneHelp.Sound.Silent -> "No sound found. Play a video first, then come back and test."
+                }
+            },
+            wrapWithGap(8),
+        )
+        card.addView(result, wrapWithGap(6))
+        return card
     }
 
     private fun step(title: String, why: String, action: String, done: (() -> Boolean)?, onAction: () -> Unit): View {
@@ -245,18 +267,24 @@ class MainActivity : Activity() {
         card.addView(row, wrapWithGap(10))
 
         card.addView(heading("Hearing her"))
-        val speechStatus = body("")
-        card.addView(speechStatus)
-        val download = primaryButton("Download Hindi speech pack", 0xFF5C6B73.toInt()) {
+        packStatus = body("")
+        card.addView(packStatus)
+        packButton = primaryButton("Download Hindi speech pack (about 66 MB)") {
             voice.downloadHindiPack { started ->
-                Toast.makeText(
-                    this,
-                    if (started) "Download requested. It may take a few minutes." else "This phone could not start the download.",
-                    Toast.LENGTH_LONG,
-                ).show()
+                if (!started) {
+                    Toast.makeText(this, "This phone could not start the download.", Toast.LENGTH_LONG).show()
+                }
+                packChecksLeft = PACK_CHECKS
+                refreshPack()
             }
         }
-        card.addView(download, wrapWithGap(8))
+        card.addView(packButton, wrapWithGap(8))
+        val followUp = CheckBox(this).apply {
+            text = "Listen for a follow-up after each answer, so she need not tap again. The mic closes if she stays silent."
+            isChecked = prefs.followUpListening
+            setOnCheckedChangeListener { _, checked -> prefs.followUpListening = checked }
+        }
+        card.addView(followUp, wrapWithGap(6))
         val online = CheckBox(this).apply {
             text = "Allow online speech if the on-device pack is missing (her voice would go to Google's speech service)"
             isChecked = prefs.allowOnlineSpeech
@@ -265,16 +293,32 @@ class MainActivity : Activity() {
         card.addView(online, wrapWithGap(6))
 
         refreshers += {
-            speechStatus.text = if (voice.isOnDeviceAvailable) {
-                "✅ On-device recognition is available, so her voice stays on the phone. If Hindi fails, download the pack below."
-            } else {
-                "This phone has no on-device recognition (needs Android 12+ and a speech pack). It can only ask for offline speech."
-            }
-            download.visibleIf(Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU)
+            refreshPack()
             // The voice engine starts up slowly, so its state is read a moment later.
             voiceStatus.postDelayed(::refreshVoices, 700)
         }
         return card
+    }
+
+    /** Shows the real state of the Hindi pack, and keeps checking while a download runs. */
+    private fun refreshPack() {
+        voice.checkHindiPack { state ->
+            if (isDestroyed) return@checkHindiPack
+            packStatus.text = when (state) {
+                VoiceIO.HindiPack.INSTALLED -> "✅ Hindi pack is ready. Her voice stays on this phone."
+                VoiceIO.HindiPack.DOWNLOADING -> "⏳ Downloading the Hindi pack. Stay on Wi-Fi. This updates by itself."
+                VoiceIO.HindiPack.NOT_INSTALLED -> "⬜ Hindi pack is not installed. Download it now so she never sees a prompt."
+                VoiceIO.HindiPack.NOT_SUPPORTED -> "⚠️ This phone offers no on-device Hindi. She can type, or allow online speech below."
+                VoiceIO.HindiPack.UNKNOWN -> "This Android version cannot report the pack. Try speaking to Saathi to test it."
+            }
+            packButton.visibleIf(state == VoiceIO.HindiPack.NOT_INSTALLED || state == VoiceIO.HindiPack.UNKNOWN)
+            packStatus.removeCallbacks(packPoll)
+            if (state == VoiceIO.HindiPack.INSTALLED) {
+                packChecksLeft = 0
+            } else if ((state == VoiceIO.HindiPack.DOWNLOADING || packChecksLeft > 0) && packChecksLeft-- > -PACK_CHECKS) {
+                packStatus.postDelayed(packPoll, PACK_POLL_MS)
+            }
+        }
     }
 
     private fun refreshVoices() {
@@ -332,14 +376,31 @@ class MainActivity : Activity() {
         return manager.isEnabled && enabled.split(':').any { it.equals(mine, ignoreCase = true) }
     }
 
-    private fun autoStartIntent(): Intent? {
-        val component = when (Build.MANUFACTURER.lowercase()) {
-            "xiaomi", "redmi", "poco" -> ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity")
-            "oppo", "realme" -> ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity")
-            "vivo", "iqoo" -> ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity")
-            "oneplus" -> ComponentName("com.oneplus.security", "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity")
-            else -> null
-        } ?: return null
-        return Intent().setComponent(component)
+    /** The screen differs by phone and OS version, so each known one is tried, then App info. */
+    private fun openAutoStart(intents: List<Intent>) {
+        for (intent in intents) {
+            if (runCatching { startActivity(intent) }.isSuccess) return
+        }
+        Toast.makeText(this, "Look under Battery for background or auto-start settings.", Toast.LENGTH_LONG).show()
+        startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+    }
+
+    private companion object {
+        const val PACK_CHECKS = 40
+        const val PACK_POLL_MS = 3_000L
+    }
+
+    private fun autoStartIntents(): List<Intent> {
+        val components = when (Build.MANUFACTURER.lowercase()) {
+            "xiaomi", "redmi", "poco" -> listOf("com.miui.securitycenter" to "com.miui.permcenter.autostart.AutoStartManagementActivity")
+            "oppo", "realme" -> listOf("com.coloros.safecenter" to "com.coloros.safecenter.permission.startup.StartupAppListActivity")
+            "vivo", "iqoo" -> listOf(
+                "com.vivo.permissionmanager" to "com.vivo.permissionmanager.activity.BgStartUpManagerActivity",
+                "com.iqoo.secure" to "com.iqoo.secure.ui.phoneoptimize.BgStartUpManager",
+            )
+            "oneplus" -> listOf("com.oneplus.security" to "com.oneplus.security.chainlaunch.view.ChainLaunchAppListActivity")
+            else -> emptyList()
+        }
+        return components.map { (pkg, activity) -> Intent().setComponent(ComponentName(pkg, activity)) }
     }
 }

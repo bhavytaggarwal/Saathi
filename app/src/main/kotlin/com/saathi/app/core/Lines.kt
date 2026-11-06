@@ -32,6 +32,10 @@ object Lines {
         "Abhi main sun nahi paa rahi. Likho button dabakar type kar dijiye.",
         "अभी मैं सुन नहीं पा रही। लिखो button दबाकर type कर दीजिए।",
     )
+    val PACK_MISSING = Line(
+        "Hindi samajhne ka pack abhi phone mein nahi hai. Tab tak Likho button dabakar type kar dijiye.",
+        "Hindi समझने का pack अभी phone में नहीं है। तब तक लिखो button दबाकर type कर दीजिए।",
+    )
     val NO_MIC = Line(
         "Mic ki permission chahiye. Saathi app kholkar setup poora kijiye.",
         "Mic की permission चाहिए। साथी app खोलकर setup पूरा कीजिए।",

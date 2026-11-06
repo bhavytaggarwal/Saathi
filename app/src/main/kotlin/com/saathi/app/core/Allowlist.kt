@@ -28,6 +28,24 @@ object Allowlist {
         "com.nothing.launcher",
     )
 
+    private val CLOCKS = setOf(
+        "com.android.deskclock",
+        "com.google.android.deskclock",
+        "com.sec.android.app.clockpackage",
+        "com.coloros.alarmclock",
+        "com.oneplus.deskclock",
+    )
+
+    private val CALCULATORS = setOf(
+        "com.vivo.calculator",
+        "com.google.android.calculator",
+        "com.android.calculator2",
+        "com.sec.android.app.popupcalculator",
+        "com.miui.calculator",
+        "com.coloros.calculator",
+        "com.oneplus.calculator",
+    )
+
     private val APPS = mapOf(
         GPAY to "Google Pay",
         SETTINGS to "Settings",
@@ -35,9 +53,13 @@ object Allowlist {
         "com.android.vending" to "Play Store",
         "com.openai.chatgpt" to "ChatGPT",
         "com.google.android.apps.bard" to "Gemini",
+        "com.google.android.apps.maps" to "Google Maps",
     )
 
-    val ALL: Set<String> = APPS.keys + LAUNCHERS
+    val ALL: Set<String> = APPS.keys + LAUNCHERS + CLOCKS + CALCULATORS
+
+    /** Number pads are normal in these apps, so a pad alone does not mean a PIN is being asked for. */
+    fun hasOrdinaryNumberPad(pkg: String?): Boolean = pkg != null && (pkg in CLOCKS || pkg in CALCULATORS)
 
     fun isAllowed(pkg: String?): Boolean = pkg != null && pkg in ALL
 
@@ -46,6 +68,8 @@ object Allowlist {
     fun label(pkg: String?): String = when {
         pkg == null -> "unknown app"
         pkg in LAUNCHERS -> "Phone home or recent apps screen"
+        pkg in CLOCKS -> "Clock"
+        pkg in CALCULATORS -> "Calculator"
         else -> APPS[pkg] ?: "an app Saathi cannot see"
     }
 }

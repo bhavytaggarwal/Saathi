@@ -99,17 +99,16 @@ class OverlayController(private val service: AccessibilityService, private val p
     // Panel views
 
     private val heard = TextView(ui).apply {
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
         setTextColor(0xFF6A5D4D.toInt())
-        maxLines = 2
+        maxLines = 1
         ellipsize = TextUtils.TruncateAt.END
         visibility = View.GONE
     }
     private val message = TextView(ui).apply {
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, FULL_TEXT_SP)
         setTextColor(0xFF1F1A14.toInt())
-        setLineSpacing(0f, 1.1f)
-        maxLines = 6
+        maxLines = FULL_LINES
         ellipsize = TextUtils.TruncateAt.END
     }
     private val input = EditText(ui).apply {
@@ -138,6 +137,10 @@ class OverlayController(private val service: AccessibilityService, private val p
         addView(pillButton("Bolo", 0xFF0F5E5C.toInt()) { cb.onListenTapped() }, rowWeight())
         addView(pillButton("Likho", 0xFF5C6B73.toInt()) { showInput() }, rowWeight())
         addView(pillButton("Phir se", 0xFF5C6B73.toInt()) { cb.onRepeatTapped() }, rowWeight())
+        addView(
+            pillButton("✕", 0xFF8A7F73.toInt()) { cb.onStopTapped() }.apply { contentDescription = "Band karo" },
+            LinearLayout.LayoutParams(dp(46), dp(BUTTON_DP)).apply { setMargins(dp(3), 0, 0, 0) },
+        )
     }
     private val reminderRow = LinearLayout(ui).apply {
         orientation = LinearLayout.HORIZONTAL
@@ -156,54 +159,37 @@ class OverlayController(private val service: AccessibilityService, private val p
     }.apply {
         val card = LinearLayout(ui).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(dp(16), dp(10), dp(16), dp(12))
+            setPadding(dp(14), dp(8), dp(14), dp(8))
             background = GradientDrawable().apply {
                 setColor(0xFFFFF8EF.toInt())
                 cornerRadius = 22 * density
                 setStroke(dp(2), 0xFFE8730C.toInt())
             }
             elevation = 10 * density
-            val header = LinearLayout(ui).apply {
-                orientation = LinearLayout.HORIZONTAL
-                gravity = Gravity.CENTER_VERTICAL
-                addView(
-                    TextView(ui).apply {
-                        text = "Saathi"
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-                        setTextColor(0xFFB85A08.toInt())
-                        typeface = Typeface.DEFAULT_BOLD
-                    },
-                    LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f),
-                )
-                addView(
-                    TextView(ui).apply {
-                        text = "✕"
-                        contentDescription = "Band karo"
-                        gravity = Gravity.CENTER
-                        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-                        setTextColor(0xFF333333.toInt())
-                        setOnClickListener { cb.onStopTapped() }
-                    },
-                    LinearLayout.LayoutParams(dp(44), dp(36)),
-                )
-            }
-            addView(header)
+            // A slim strip expands when she taps it.
+            setOnClickListener { setCompact(false) }
             addView(heard)
             addView(message)
-            addView(inputRow, topGap(8))
-            addView(reminderRow, topGap(10))
-            addView(actionRow, topGap(10))
+            addView(inputRow, topGap(6))
+            addView(reminderRow, topGap(6))
+            addView(actionRow, topGap(6))
         }
         addView(
             card,
             FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
-                setMargins(dp(12), dp(8), dp(12), dp(12))
+                setMargins(dp(10), dp(4), dp(10), dp(4))
             },
         )
     }
-    private val panelParams = baseParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+    private val panelParams = baseParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.WRAP_CONTENT,
+        WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+    )
+    private var compact = false
+    private var reminderShown = false
 
-    private fun rowWeight() = LinearLayout.LayoutParams(0, dp(52), 1f).apply {
+    private fun rowWeight() = LinearLayout.LayoutParams(0, dp(BUTTON_DP), 1f).apply {
         setMargins(dp(3), 0, dp(3), 0)
     }
 
@@ -216,10 +202,10 @@ class OverlayController(private val service: AccessibilityService, private val p
         text = label
         isAllCaps = false
         setTextColor(Color.WHITE)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
         typeface = Typeface.DEFAULT_BOLD
-        minimumHeight = dp(48)
-        setPadding(dp(14), 0, dp(14), 0)
+        gravity = Gravity.CENTER
+        setPadding(dp(8), 0, dp(8), 0)
         background = GradientDrawable().apply {
             setColor(color)
             cornerRadius = 26 * density
@@ -237,6 +223,13 @@ class OverlayController(private val service: AccessibilityService, private val p
         restoreBubbleHome()
         wm.addView(bubble, bubbleParams)
         installBubbleTouch()
+        // Touching the app beneath shrinks the panel. The touch itself still reaches the app.
+        panel.setOnTouchListener { _, event ->
+            if (event.actionMasked == MotionEvent.ACTION_OUTSIDE && inputRow.visibility != View.VISIBLE) {
+                setCompact(true)
+            }
+            false
+        }
     }
 
     fun detach() {
@@ -322,7 +315,7 @@ class OverlayController(private val service: AccessibilityService, private val p
         panelAttached = false
     }
 
-    private fun panelOffset() = dp(if (panelAtTop) 34 else 44)
+    private fun panelOffset() = dp(if (panelAtTop) 30 else 42)
 
     private fun placePanel(atTop: Boolean) {
         if (panelAtTop == atTop) return
@@ -340,18 +333,34 @@ class OverlayController(private val service: AccessibilityService, private val p
 
     fun setHeard(text: String?) {
         heard.text = text.orEmpty()
-        heard.visibility = if (text.isNullOrBlank()) View.GONE else View.VISIBLE
+        updatePanelRows()
     }
 
     fun showReminderButtons(show: Boolean) {
-        reminderRow.visibility = if (show) View.VISIBLE else View.GONE
-        actionRow.visibility = if (show) View.GONE else View.VISIBLE
+        reminderShown = show
+        if (show) compact = false
+        updatePanelRows()
+    }
+
+    /** Slim strip of up to two lines, so the app beneath stays visible while she follows a step. */
+    fun setCompact(value: Boolean) {
+        compact = value && !reminderShown
+        updatePanelRows()
+    }
+
+    private fun updatePanelRows() {
+        heard.visibility = if (compact || heard.text.isNullOrBlank()) View.GONE else View.VISIBLE
+        message.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) COMPACT_TEXT_SP else FULL_TEXT_SP)
+        message.maxLines = if (compact) COMPACT_LINES else FULL_LINES
+        reminderRow.visibility = if (reminderShown) View.VISIBLE else View.GONE
+        actionRow.visibility = if (compact || reminderShown) View.GONE else View.VISIBLE
     }
 
     // Typing
 
     private fun showInput() {
         cb.onTypingStarted()
+        setCompact(false)
         inputRow.visibility = View.VISIBLE
         placePanel(true)
         panelParams.flags = panelParams.flags and WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
@@ -372,6 +381,8 @@ class OverlayController(private val service: AccessibilityService, private val p
         panelParams.flags = panelParams.flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
         panelParams.softInputMode = WindowManager.LayoutParams.SOFT_INPUT_STATE_UNSPECIFIED
         if (panelAttached) wm.updateViewLayout(panel, panelParams)
+        // The panel only moved up to clear the keyboard, so it goes back down afterwards.
+        placePanel(false)
     }
 
     private fun submitTyped() {
@@ -386,14 +397,15 @@ class OverlayController(private val service: AccessibilityService, private val p
     fun pointAt(target: Rect?, gesture: String, usesGestureNavigation: Boolean) {
         if (!attached) return
         val size = screen()
+        setCompact(true)
         if (target != null) {
             placePanel(target.centerY() > size.y / 2)
             val destination = besideTarget(target, size)
             moveBubble(destination.x, destination.y)
             pointer.setArrowStart(destination.x + bubbleSize / 2f, destination.y + bubbleSize / 2f)
         } else {
-            // System gestures happen at the bottom edge, so the panel moves up.
-            placePanel(true)
+            // System gestures happen at the bottom edge, so only they move the panel up.
+            placePanel(gesture.startsWith("nav_"))
             pointer.setArrowStart(-1f, -1f)
         }
         pointer.point(target, gesture, usesGestureNavigation)
@@ -428,6 +440,8 @@ class OverlayController(private val service: AccessibilityService, private val p
     fun returnHome() {
         if (!attached) return
         pointer.clear()
+        compact = false
+        placePanel(false)
         val size = screen()
         val x = if (prefs.bubbleX >= 0) prefs.bubbleX.coerceIn(0, size.x - bubbleSize) else size.x - bubbleSize - dp(4)
         val y = if (prefs.bubbleY >= 0) prefs.bubbleY.coerceIn(0, size.y - bubbleSize) else size.y * 2 / 3
@@ -549,5 +563,10 @@ class OverlayController(private val service: AccessibilityService, private val p
         const val BUBBLE_DP = 72
         const val DOT_DP = 30
         const val DISMISS_ZONE_DP = 110
+        const val BUTTON_DP = 44
+        const val FULL_TEXT_SP = 19f
+        const val COMPACT_TEXT_SP = 17f
+        const val FULL_LINES = 4
+        const val COMPACT_LINES = 2
     }
 }

@@ -44,6 +44,11 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("online_speech", false)
         set(value) = prefs.edit().putBoolean("online_speech", value).apply()
 
+    /** After an answer the mic reopens once for a follow-up. It closes if she stays silent. */
+    var followUpListening: Boolean
+        get() = prefs.getBoolean("follow_up", true)
+        set(value) = prefs.edit().putBoolean("follow_up", value).apply()
+
     var bubbleX: Int
         get() = prefs.getInt("bubble_x", -1)
         set(value) = prefs.edit().putInt("bubble_x", value).apply()

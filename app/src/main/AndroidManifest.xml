@@ -76,6 +76,11 @@
             <intent-filter>
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
+            <!-- Android 12+: conversations and other alerts start switched off. A person can turn
+                 them on in Android's own settings at their own risk. Saathi does not use them. -->
+            <meta-data
+                android:name="android.service.notification.default_filter_types"
+                android:value="ongoing" />
         </service>
 
         <receiver

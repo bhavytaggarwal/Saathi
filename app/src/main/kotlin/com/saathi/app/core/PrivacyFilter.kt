@@ -90,7 +90,7 @@ object PrivacyFilter {
     )
 
     /** True when the screen is asking for a secret. Saathi must then hide and send nothing. */
-    fun hasSecret(nodes: List<NodeFacts>): Boolean {
+    fun hasSecret(nodes: List<NodeFacts>, numberPadMeansSecret: Boolean = true): Boolean {
         val keypadDigits = HashSet<String>()
         for (node in nodes) {
             if (node.isPassword) return true
@@ -110,7 +110,7 @@ object PrivacyFilter {
             }
         }
         // A number pad drawn by the app, as custom PIN screens do.
-        return keypadDigits.size >= 9
+        return numberPadMeansSecret && keypadDigits.size >= 9
     }
 
     private val PAYMENT = Regex(

@@ -92,16 +92,19 @@ object ScreenReader {
     }
 
     /** The on-device check used even when resting. It keeps nothing and sends nothing. */
-    fun checkPrivacy(root: AccessibilityNodeInfo): Pair<Boolean, Boolean> {
+    fun checkPrivacy(root: AccessibilityNodeInfo, pkg: String): Pair<Boolean, Boolean> {
         val facts = collect(root).map { it.facts }
-        return PrivacyFilter.hasSecret(facts) to PrivacyFilter.isPaymentScreen(facts)
+        return hasSecret(facts, pkg) to PrivacyFilter.isPaymentScreen(facts)
     }
+
+    private fun hasSecret(facts: List<NodeFacts>, pkg: String) =
+        PrivacyFilter.hasSecret(facts, numberPadMeansSecret = !Allowlist.hasOrdinaryNumberPad(pkg))
 
     /** Full read for an active help session. Callers must have checked the allowlist. */
     fun read(root: AccessibilityNodeInfo, pkg: String): ScreenSnapshot {
         val raw = collect(root)
         val facts = raw.map { it.facts }
-        if (PrivacyFilter.hasSecret(facts)) return ScreenSnapshot(pkg, true, false, false, emptyList(), false)
+        if (hasSecret(facts, pkg)) return ScreenSnapshot(pkg, true, false, false, emptyList(), false)
 
         val payment = PrivacyFilter.isPaymentScreen(facts)
         if (payment) return ScreenSnapshot(pkg, false, true, false, emptyList(), false)

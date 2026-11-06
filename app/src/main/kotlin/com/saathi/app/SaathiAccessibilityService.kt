@@ -23,8 +23,8 @@ class SaathiAccessibilityService : AccessibilityService() {
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         val pkg = event?.packageName?.toString() ?: return
-        // Only the event type and package are used. The event's own text is never touched.
-        assistant?.onEvent(event.eventType, pkg)
+        // Only the type, package and screen class are used. The event's own text is never touched.
+        assistant?.onEvent(event.eventType, pkg, event.className?.toString())
     }
 
     override fun onInterrupt() = Unit
