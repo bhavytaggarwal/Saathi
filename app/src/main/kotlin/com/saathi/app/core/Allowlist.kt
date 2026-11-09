@@ -56,20 +56,49 @@ object Allowlist {
         "com.google.android.apps.maps" to "Google Maps",
     )
 
+    /** The fixed list. accessibility_service_config.xml must match it exactly. */
     val ALL: Set<String> = APPS.keys + LAUNCHERS + CLOCKS + CALCULATORS
 
+    // This phone's own Clock, Calculator and home screen apps, found from Android at startup,
+    // because phone makers name them differently (Vivo, Tecno and others).
+    @Volatile private var phoneClocks: Set<String> = emptySet()
+    @Volatile private var phoneCalculators: Set<String> = emptySet()
+    @Volatile private var phoneLaunchers: Set<String> = emptySet()
+
+    /** Apps that answer alarm or home intents but must never be read, such as the Google app. */
+    private val NEVER = Regex(
+        "(?i)whatsapp|messaging|truecaller|android\\.gm|systemui|sbi|hdfc|icici|" +
+            "googlequicksearchbox|googleassistant|bank|paytm|phonepe"
+    )
+
+    /**
+     * Adds the phone's own apps. Callers pass only preinstalled system apps. Anything matching
+     * [NEVER] is dropped here as well. Returns what was added beyond the fixed list.
+     */
+    fun addPhoneApps(clocks: Set<String>, calculators: Set<String>, launchers: Set<String>): Set<String> {
+        fun clean(found: Set<String>) = found.filterTo(HashSet()) { !NEVER.containsMatchIn(it) && it !in APPS }
+        phoneClocks = clean(clocks)
+        phoneCalculators = clean(calculators)
+        phoneLaunchers = clean(launchers)
+        return (phoneClocks + phoneCalculators + phoneLaunchers) - ALL
+    }
+
+    private fun isClock(pkg: String) = pkg in CLOCKS || pkg in phoneClocks
+    private fun isCalculator(pkg: String) = pkg in CALCULATORS || pkg in phoneCalculators
+
     /** Number pads are normal in these apps, so a pad alone does not mean a PIN is being asked for. */
-    fun hasOrdinaryNumberPad(pkg: String?): Boolean = pkg != null && (pkg in CLOCKS || pkg in CALCULATORS)
+    fun hasOrdinaryNumberPad(pkg: String?): Boolean = pkg != null && (isClock(pkg) || isCalculator(pkg))
 
-    fun isAllowed(pkg: String?): Boolean = pkg != null && pkg in ALL
+    fun isAllowed(pkg: String?): Boolean =
+        pkg != null && (pkg in ALL || pkg in phoneClocks || pkg in phoneCalculators || pkg in phoneLaunchers)
 
-    fun isLauncher(pkg: String?): Boolean = pkg != null && pkg in LAUNCHERS
+    fun isLauncher(pkg: String?): Boolean = pkg != null && (pkg in LAUNCHERS || pkg in phoneLaunchers)
 
     fun label(pkg: String?): String = when {
         pkg == null -> "unknown app"
-        pkg in LAUNCHERS -> "Phone home or recent apps screen"
-        pkg in CLOCKS -> "Clock"
-        pkg in CALCULATORS -> "Calculator"
+        isLauncher(pkg) -> "Phone home or recent apps screen"
+        isClock(pkg) -> "Clock"
+        isCalculator(pkg) -> "Calculator"
         else -> APPS[pkg] ?: "an app Saathi cannot see"
     }
 }

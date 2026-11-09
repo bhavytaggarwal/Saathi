@@ -127,6 +127,25 @@ class PrivacyFilterTest {
         assertFalse(Allowlist.isAllowed(null))
     }
 
+    @Test fun addsThePhonesOwnClockButNeverAssistantOrMessagingApps() {
+        try {
+            val added = Allowlist.addPhoneApps(
+                clocks = setOf("com.android.BBKClock", "com.google.android.googlequicksearchbox"),
+                calculators = setOf("com.android.bbkcalculator"),
+                launchers = setOf("com.android.settings", "com.google.android.apps.messaging"),
+            )
+            assertEquals(setOf("com.android.BBKClock", "com.android.bbkcalculator"), added)
+            assertTrue(Allowlist.isAllowed("com.android.BBKClock"))
+            assertTrue(Allowlist.hasOrdinaryNumberPad("com.android.BBKClock"))
+            assertEquals("Clock", Allowlist.label("com.android.BBKClock"))
+            assertFalse(Allowlist.isAllowed("com.google.android.googlequicksearchbox"))
+            assertFalse(Allowlist.isAllowed("com.google.android.apps.messaging"))
+            assertEquals("Settings", Allowlist.label("com.android.settings"))
+        } finally {
+            Allowlist.addPhoneApps(emptySet(), emptySet(), emptySet())
+        }
+    }
+
     @Test fun androidAllowlistMatchesCodeAllowlist() {
         val config = File("src/main/res/xml/accessibility_service_config.xml").readText()
         val declared = Regex("android:packageNames=\"([^\"]+)\"").find(config)!!.groupValues[1].split(",").toSet()
@@ -138,28 +157,121 @@ class PrivacyFilterTest {
         assertFalse(config.contains("android:canPerformGestures"))
     }
 
+    @Test fun masksAmountsWithCurrencyAfterOrInHindi() {
+        assertEquals("Paid [number]", PrivacyFilter.maskScreenText("Paid 500 rupees"))
+        assertEquals("[number] bheje", PrivacyFilter.maskScreenText("50 Rs bheje"))
+        assertEquals("[number] बाकी", PrivacyFilter.maskScreenText("रु 250 बाकी"))
+    }
+
+    @Test fun masksDigitsSpokenAsEnglishWordsOrMixed() {
+        assertEquals("otp [number]", PrivacyFilter.filterSpeech("otp फोर फाइव सिक्स सेवन").text)
+        assertEquals("pin [number]", PrivacyFilter.filterSpeech("pin 45 ek 67").text)
+        assertFalse(PrivacyFilter.filterSpeech("10 do packet").masked)
+    }
+
+    @Test fun recognisesACollectRequestOnAPaymentScreen() {
+        val collect = listOf(NodeFacts(text = "Rahul is requesting ₹500"), NodeFacts(text = "Pay ₹500", isClickable = true))
+        assertTrue(PrivacyFilter.isPaymentScreen(collect))
+        assertTrue(PrivacyFilter.isScamScreen(collect))
+        assertFalse(PrivacyFilter.isScamScreen(listOf(NodeFacts(text = "Pay ₹500"))))
+    }
+
     // AI reply contract
 
-    @Test fun parsesAStep() {
-        val reply = AiReply.parse(
-            """{"mode":"step","text":"Add bank account pe tap karo","speech":"Add bank account पे tap करो","point_at":3,"gesture":"tap","task":"add bank"}"""
-        )!!
-        assertEquals("step", reply.mode)
-        assertEquals(3, reply.pointAt)
+    private fun parsed(raw: String) = (AiReply.parse(raw) as AiReply.Parsed.Ok).reply
+
+    private fun invalid(raw: String) = (AiReply.parse(raw) as AiReply.Parsed.Invalid).reason
+
+    @Test fun parsesAGuideStep() {
+        val reply = parsed(
+            """{"intent":"guide_step","confidence":0.92,"say_roman":"Add bank account pe tap karo","say_devanagari":"Add bank account पे tap करो","target_element":3,"gesture":"tap","state_patch":{}}"""
+        )
+        assertEquals("guide_step", reply.intent)
+        assertEquals(3, reply.targetElement)
         assertEquals("Add bank account पे tap करो", reply.line.speech)
     }
 
-    @Test fun parsesListItemsAndFence() {
-        val reply = AiReply.parse(
-            "```json\n{\"mode\":\"list_add\",\"text\":\"\",\"speech\":\"\",\"items\":[{\"name\":\"Maggi\",\"name_hi\":\"मैगी\",\"qty\":\"2 packet\"}]}\n```"
-        )!!
-        assertEquals("2 packet", reply.items.single().qty)
-        assertEquals("मैगी", reply.items.single().nameHi)
+    @Test fun ignoresATargetOutsidePointingIntents() {
+        val reply = parsed("""{"intent":"chat","confidence":1,"say_roman":"Namaste","say_devanagari":"नमस्ते","target_element":4,"state_patch":{}}""")
+        assertNull(reply.targetElement)
     }
 
-    @Test fun rejectsAnythingOffContract() {
-        assertNull(AiReply.parse("not json"))
-        assertNull(AiReply.parse("""{"mode":"tap_button","text":"x","speech":"x"}"""))
+    @Test fun parsesListActionAndFence() {
+        val reply = parsed(
+            "```json\n{\"intent\":\"list_add\",\"confidence\":0.9,\"say_roman\":\"\",\"say_devanagari\":\"\"," +
+                "\"action\":{\"type\":\"list_add\",\"list\":\"shopping\",\"items\":[{\"name\":\"Maggi\",\"name_hi\":\"मैगी\",\"qty\":\"2 packet\"}]},\"state_patch\":{}}\n```"
+        )
+        assertEquals("2 packet", reply.action!!.items.single().qty)
+        assertEquals("मैगी", reply.action!!.items.single().nameHi)
+    }
+
+    @Test fun parsesADailyReminder() {
+        val reply = parsed(
+            """{"intent":"reminder_set","confidence":0.8,"say_roman":"Roz raat 9 baje bolungi.","say_devanagari":"","action":{"type":"reminder_set","text":"dawai","time":"21:00","repeat":"daily"},"state_patch":{}}"""
+        )
+        assertEquals("daily", reply.action!!.repeat)
+        assertEquals("dawai", reply.action!!.textHi)
+    }
+
+    @Test fun rejectsAnythingOffContractWithAReason() {
+        assertEquals("it was not one JSON object", invalid("not json"))
+        assertTrue(invalid("""{"intent":"tap_button","confidence":1,"say_roman":"x","say_devanagari":"x"}""").contains("tap_button"))
+        assertEquals("confidence is missing", invalid("""{"intent":"chat","say_roman":"x","say_devanagari":"x"}"""))
+        assertEquals("say_roman is empty", invalid("""{"intent":"chat","confidence":1,"say_roman":"","say_devanagari":""}"""))
+        assertEquals("list_add needs action.items", invalid("""{"intent":"list_add","confidence":1,"say_roman":"","say_devanagari":""}"""))
+        assertTrue(
+            invalid("""{"intent":"reminder_set","confidence":1,"say_roman":"","say_devanagari":"","action":{"type":"reminder_set","text":"dawai","time":"raat 9","repeat":"daily"}}""")
+                .contains("raat 9")
+        )
+    }
+
+    // Session state
+
+    @Test fun startsAGoalAndKeepsAppOwnedFields() {
+        val state = SessionState()
+        val first = state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add a bank account in GPay","kind":"guide","app":"Google Pay"}}"""))
+        assertTrue(first.goalStarted)
+        state.goal = state.goal!!.copy(step = 3)
+        // A text-only change refines the same goal and keeps the step count.
+        val refined = state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add SBI account in GPay","step":99}}"""))
+        assertFalse(refined.goalStarted)
+        assertEquals(3, state.goal!!.step)
+        assertEquals("Add SBI account in GPay", state.goal!!.text)
+    }
+
+    @Test fun aNewKindStartsFreshAndNullClears() {
+        val state = SessionState()
+        state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add bank","kind":"guide"},"last_step":{"target_label":"Add bank account","expected_next":"bank list"}}"""))
+        assertEquals("Add bank account", state.lastStep.targetLabel)
+        val topic = state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Medicine reminder at 9 pm","kind":"reminder"}}"""))
+        assertTrue(topic.goalStarted)
+        assertNull(state.lastStep.targetLabel)
+        state.applyPatch(org.json.JSONObject("""{"last_step":{"expected_next":"x"},"pending_question":{"question":"List ya reminder?","options":["list","reminder"]}}"""))
+        assertEquals(listOf("list", "reminder"), state.pendingQuestion!!.options)
+        state.applyPatch(org.json.JSONObject("""{"goal":null,"pending_question":null}"""))
+        assertNull(state.goal)
+        assertNull(state.pendingQuestion)
+    }
+
+    @Test fun ignoresStatusesTheAppOwns() {
+        val state = SessionState()
+        state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add bank","kind":"guide"}}"""))
+        state.applyPatch(org.json.JSONObject("""{"goal":{"status":"expired"}}"""))
+        assertEquals(SessionState.ACTIVE, state.goal!!.status)
+        state.applyPatch(org.json.JSONObject("""{"goal":{"status":"done"}}"""))
+        assertEquals(SessionState.DONE, state.goal!!.status)
+    }
+
+    @Test fun stateJsonHasEveryFieldAndNoMissingKeys() {
+        val state = SessionState()
+        state.lastActivityAt = 1_000
+        state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add bank","kind":"guide"}}"""))
+        state.lastAction = LastAction("list_add", list = "shopping", items = listOf("doodh"))
+        val json = state.toJson(now = 13_000)
+        assertEquals(12, json.getJSONObject("goal").getInt("idle_s"))
+        assertTrue(json.isNull("pending_question"))
+        assertTrue(json.has("screen"))
+        assertEquals("doodh", json.getJSONObject("last_action").getJSONArray("items").getString(0))
     }
 
     @Test fun validatesReminderTimes() {

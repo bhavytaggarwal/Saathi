@@ -1,7 +1,11 @@
 package com.saathi.app
 
 import android.accessibilityservice.AccessibilityService
+import android.content.Intent
+import android.content.pm.ApplicationInfo
 import android.content.res.Configuration
+import android.provider.AlarmClock
+import android.util.Log
 import android.graphics.Bitmap
 import android.os.Build
 import android.util.Base64
@@ -18,7 +22,12 @@ class SaathiAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         instance = this
-        assistant = Assistant(this).also { it.start() }
+        addPhoneApps()
+        // Set before start(), because start() fires reminders missed while the service was away,
+        // and those reach the assistant through this field.
+        val created = Assistant(this)
+        assistant = created
+        created.start()
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -39,6 +48,37 @@ class SaathiAccessibilityService : AccessibilityService() {
         assistant = null
         instance = null
         super.onDestroy()
+    }
+
+    /**
+     * Finds this phone's own Clock, Calculator and home screen apps, which phone makers name
+     * differently, and lets Saathi read them too. Only preinstalled system apps count, so an app
+     * she installs later cannot get itself read by answering the same intents.
+     */
+    private fun addPhoneApps() {
+        fun systemAppsFor(intent: Intent): Set<String> {
+            @Suppress("DEPRECATION")
+            val found = runCatching { packageManager.queryIntentActivities(intent, 0) }.getOrDefault(emptyList())
+            return found.mapNotNull { info ->
+                val app = info.activityInfo?.applicationInfo ?: return@mapNotNull null
+                val system = app.flags and (ApplicationInfo.FLAG_SYSTEM or ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+                app.packageName.takeIf { system && it != packageName }
+            }.toSet()
+        }
+        val added = Allowlist.addPhoneApps(
+            clocks = systemAppsFor(Intent(AlarmClock.ACTION_SHOW_ALARMS)),
+            calculators = systemAppsFor(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_CALCULATOR)),
+            launchers = systemAppsFor(Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)),
+        )
+        // Package names only, so the log shows what was found on a new phone.
+        Log.i("SaathiAllowlist", "phone apps added: $added")
+        if (added.isEmpty()) return
+        // The XML list filters events. Without this, these apps would send none.
+        runCatching {
+            serviceInfo = serviceInfo.apply {
+                packageNames = ((packageNames?.toSet() ?: Allowlist.ALL) + added).toTypedArray()
+            }
+        }
     }
 
     /** Only the package name of the active window. No content is read here. */

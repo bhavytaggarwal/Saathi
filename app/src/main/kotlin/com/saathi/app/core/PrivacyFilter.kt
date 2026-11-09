@@ -17,7 +17,11 @@ object PrivacyFilter {
     private const val ID_MASK = "[id]"
 
     private val EMAIL_OR_UPI = Regex("[\\w.+-]+@[\\w.-]+")
-    private val CURRENCY = Regex("(?i)(₹|\\brs\\.?|\\binr)\\s*\\p{Nd}[\\p{Nd},.]*")
+    // Amounts with the currency before or after the number: "₹500", "Rs. 50", "500 rupees", "रु 50".
+    private val CURRENCY = Regex(
+        "(?i)(?:₹|\\brs\\.?|\\binr|\\brupees?|रुपये|रुपए|रु\\.?)\\s*\\p{Nd}[\\p{Nd},.]*|" +
+            "\\p{Nd}[\\p{Nd},.]*\\s*(?:₹|rs\\b\\.?|inr\\b|rupees?\\b|रुपये|रुपए|रु\\.?)"
+    )
     private val DIGIT_RUN = Regex("\\+?\\p{Nd}(?:[\\p{Nd}\\s\\-.,]*\\p{Nd})?")
 
     /** Masks account numbers, amounts, balances, phones, emails and UPI IDs before anything is sent. */
@@ -35,6 +39,8 @@ object PrivacyFilter {
         "shunya", "ek", "do", "teen", "char", "chaar", "panch", "paanch", "che", "chhe", "chah",
         "saat", "sat", "aath", "ath", "nau", "no",
         "शून्य", "एक", "दो", "तीन", "चार", "पांच", "पाँच", "छह", "छः", "छे", "सात", "आठ", "नौ",
+        // The Hindi recogniser often writes English number words in Devanagari.
+        "जीरो", "ज़ीरो", "वन", "टू", "थ्री", "फोर", "फ़ोर", "फाइव", "फ़ाइव", "सिक्स", "सेवन", "एट", "नाइन",
     )
     private val SECRET_TALK = Regex("(?i)\\b(otp|pin|password|code|cvv)\\b|ओटीपी|पिन|पासवर्ड|कोड")
 
@@ -42,28 +48,34 @@ object PrivacyFilter {
 
     /**
      * Replaces any run of 4 or more digits she says with [MASK], whether the recogniser wrote them
-     * as digits ("4 5 6 7"), Devanagari digits, or words ("ek do teen char").
+     * as digits ("4 5 6 7"), Devanagari digits, words ("ek do teen char") or a mix ("45 ek 67").
      */
     fun filterSpeech(input: String): SpeechResult {
         val digitsMasked = maskDigitRuns(input)
         val tokens = digitsMasked.split(Regex("\\s+")).filter { it.isNotEmpty() }
         val output = mutableListOf<String>()
         var run = mutableListOf<String>()
+        var runDigits = 0
         var wordsMasked = false
 
         fun flush() {
-            if (run.size >= 4) {
+            if (runDigits >= 4) {
                 output += MASK
                 wordsMasked = true
             } else {
                 output += run
             }
             run = mutableListOf()
+            runDigits = 0
         }
         for (token in tokens) {
             val bare = token.trim(',', '.', '?', '!', '।').lowercase()
-            if (bare in NUMBER_WORDS || (bare.isNotEmpty() && bare.all(Char::isDigit))) {
+            if (bare in NUMBER_WORDS) {
                 run += token
+                runDigits += 1
+            } else if (bare.isNotEmpty() && bare.all(Char::isDigit)) {
+                run += token
+                runDigits += bare.length
             } else {
                 flush()
                 output += token
@@ -127,9 +139,18 @@ object PrivacyFilter {
     private val SCAM = Regex(
         "(?i)\\b(anydesk|teamviewer|rustdesk|quick ?support|airdroid)\\b|" +
             "\\b(collect request|wants to collect|requesting money|approve (this )?(request|payment))\\b|" +
+            "\\brequesting\\s*(₹|rs\\b)|" +
             "\\bshare (this |the |your )?(code|otp|pin)\\b|otp (maang|bata)|कोड (बता|शेयर)"
     )
 
     /** True when the screen or her words point at a known scam pattern. */
     fun looksLikeScam(text: String): Boolean = SCAM.containsMatchIn(text)
+
+    /**
+     * True when any element on screen looks like a scam. Checked on payment screens too, because a
+     * collect request is itself a payment screen and must still be warned about.
+     */
+    fun isScamScreen(nodes: List<NodeFacts>): Boolean = nodes.any { node ->
+        listOfNotNull(node.text, node.description).any(::looksLikeScam)
+    }
 }

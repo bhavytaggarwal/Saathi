@@ -53,6 +53,10 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
 
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    private var ttsStarting = true
+
+    // A line asked for while the engine was still starting, such as a reminder due at a restart.
+    private var queued: Pair<String, (() -> Unit)?>? = null
     private val callbacks = HashMap<String, () -> Unit>()
     private var recognizer: SpeechRecognizer? = null
 
@@ -74,7 +78,12 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         tts = TextToSpeech(appContext) { status ->
             main.post {
                 ttsReady = status == TextToSpeech.SUCCESS
+                ttsStarting = false
                 if (ttsReady) configureTts()
+                queued?.let { (speech, onDone) ->
+                    queued = null
+                    speak(speech, onDone)
+                }
             }
         }
     }
@@ -150,6 +159,11 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
     /** Speaks one line, replacing whatever was being said. */
     fun speak(speech: String, onDone: (() -> Unit)? = null) {
         val engine = tts
+        if (engine != null && !ttsReady && ttsStarting) {
+            // Spoken as soon as the engine is ready. A newer line replaces it, as QUEUE_FLUSH would.
+            queued = speech to onDone
+            return
+        }
         if (engine == null || !ttsReady) {
             onDone?.let { main.post(it) }
             return
@@ -165,6 +179,7 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
     }
 
     fun stopSpeaking() {
+        queued = null
         callbacks.clear()
         tts?.stop()
         onSpeakingChanged?.invoke(false)

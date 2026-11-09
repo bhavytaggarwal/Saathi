@@ -52,6 +52,17 @@ object Lines {
         "Koi baat nahi, phir se karte hain. Ek baar aur boliye.",
         "कोई बात नहीं, फिर से करते हैं। एक बार और बोलिए।",
     )
+    /** Said when the model's reply was invalid twice in a row. */
+    val RETRY_FAILED = Line("Ek second, phir se dekhti hoon.", "एक second, फिर से देखती हूँ।")
+    val REMINDER_SET = Line("Theek hai, yaad dila dungi.", "ठीक है, याद दिला दूँगी।")
+    val NOTED = Line("Theek hai, maine note kar liya.", "ठीक है, मैंने note कर लिया।")
+
+    /** Asked instead of saving when the model was not sure what she said. */
+    fun confirmHeard(roman: String, hindi: String) = Line(
+        "Maine suna: $roman. Sahi hai?",
+        "मैंने सुना: $hindi। सही है?",
+    )
+
     val SLOWER = Line("Theek hai, ab dheere bolti hoon.", "ठीक है, अब धीरे बोलती हूँ।")
     val FASTER = Line("Theek hai, thoda tez bolti hoon.", "ठीक है, थोड़ा तेज़ बोलती हूँ।")
     val BYE = Line("Theek hai, main yahin hoon.", "ठीक है, मैं यहीं हूँ।")
@@ -125,9 +136,9 @@ object Lines {
         "याद दिला रही हूँ: $titleHi",
     )
 
-    private fun joinRoman(items: List<ListItem>) =
+    fun joinRoman(items: List<ListItem>) =
         items.joinToString(", ") { listOf(it.qty, it.name).filter(String::isNotBlank).joinToString(" ") }
 
-    private fun joinHindi(items: List<ListItem>) =
+    fun joinHindi(items: List<ListItem>) =
         items.joinToString(", ") { listOf(it.qty, it.nameHi).filter(String::isNotBlank).joinToString(" ") }
 }

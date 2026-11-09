@@ -12,3 +12,5 @@ secrets.properties
 .env*
 *.keystore
 *.jks
+eval/results/
+__pycache__/

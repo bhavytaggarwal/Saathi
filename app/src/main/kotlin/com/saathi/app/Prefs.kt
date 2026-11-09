@@ -49,6 +49,11 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("follow_up", true)
         set(value) = prefs.edit().putBoolean("follow_up", value).apply()
 
+    /** Off by default. When on, each turn is saved on the phone, masked, for building eval cases. */
+    var evalLog: Boolean
+        get() = prefs.getBoolean("eval_log", false)
+        set(value) = prefs.edit().putBoolean("eval_log", value).apply()
+
     var bubbleX: Int
         get() = prefs.getInt("bubble_x", -1)
         set(value) = prefs.edit().putInt("bubble_x", value).apply()

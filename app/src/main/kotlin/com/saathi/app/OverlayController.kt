@@ -45,6 +45,7 @@ class OverlayController(private val service: AccessibilityService, private val p
         fun onBubbleDismissed()
         fun onReminderDone()
         fun onReminderSnooze()
+        fun onWrongTapped()
     }
 
     private val wm = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
@@ -148,6 +149,17 @@ class OverlayController(private val service: AccessibilityService, private val p
         addView(pillButton("Ho gaya", 0xFF23A455.toInt()) { cb.onReminderDone() }, rowWeight())
         addView(pillButton("10 minute baad", 0xFFE8730C.toInt()) { cb.onReminderSnooze() }, rowWeight())
     }
+
+    // Shown only while the eval log is on, for her son to mark a wrong reply while testing.
+    private val evalRow = LinearLayout(ui).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.END
+        visibility = View.GONE
+        addView(
+            pillButton("Galat tha", 0xFF8A7F73.toInt()) { cb.onWrongTapped() },
+            LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)),
+        )
+    }
     private val panel = object : FrameLayout(ui) {
         override fun dispatchKeyEvent(event: KeyEvent): Boolean {
             if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP && inputRow.visibility == VISIBLE) {
@@ -173,6 +185,7 @@ class OverlayController(private val service: AccessibilityService, private val p
             addView(inputRow, topGap(6))
             addView(reminderRow, topGap(6))
             addView(actionRow, topGap(6))
+            addView(evalRow, topGap(4))
         }
         addView(
             card,
@@ -188,6 +201,7 @@ class OverlayController(private val service: AccessibilityService, private val p
     )
     private var compact = false
     private var reminderShown = false
+    private var evalShown = false
 
     private fun rowWeight() = LinearLayout.LayoutParams(0, dp(BUTTON_DP), 1f).apply {
         setMargins(dp(3), 0, dp(3), 0)
@@ -293,8 +307,10 @@ class OverlayController(private val service: AccessibilityService, private val p
         if (withPanel) showPanel() else hidePanel()
     }
 
+    /** After she drags the face away. The panel goes too, or it would stay with no face to close it. */
     fun hideBubbleOnly() {
         bubble.visibility = View.GONE
+        hidePanel()
     }
 
     private fun showPanel() {
@@ -342,6 +358,11 @@ class OverlayController(private val service: AccessibilityService, private val p
         updatePanelRows()
     }
 
+    fun showEvalButton(show: Boolean) {
+        evalShown = show
+        updatePanelRows()
+    }
+
     /** Slim strip of up to two lines, so the app beneath stays visible while she follows a step. */
     fun setCompact(value: Boolean) {
         compact = value && !reminderShown
@@ -354,6 +375,7 @@ class OverlayController(private val service: AccessibilityService, private val p
         message.maxLines = if (compact) COMPACT_LINES else FULL_LINES
         reminderRow.visibility = if (reminderShown) View.VISIBLE else View.GONE
         actionRow.visibility = if (compact || reminderShown) View.GONE else View.VISIBLE
+        evalRow.visibility = if (evalShown && !compact && !reminderShown) View.VISIBLE else View.GONE
     }
 
     // Typing
@@ -526,6 +548,10 @@ class OverlayController(private val service: AccessibilityService, private val p
         val nearBottom = bubbleParams.y + bubbleSize > size.y - dp(DISMISS_ZONE_DP)
         if (nearBottom && abs(centerX - size.x / 2) < size.x / 3) {
             cb.onBubbleDismissed()
+            // Back to its saved place while hidden, so it does not return over the bottom of the screen.
+            mover?.cancel()
+            restoreBubbleHome()
+            runCatching { wm.updateViewLayout(bubble, bubbleParams) }
             return
         }
         // Rest against the nearer edge so it covers as little as possible.

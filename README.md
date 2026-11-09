@@ -2,7 +2,7 @@
 
 An on-screen Hindi and Hinglish helper for parents who are new to smartphones. A small character sits on top of apps, reads the screen of allowed apps, points at the exact button and speaks one step at a time. **It never taps, types or swipes for her.**
 
-Built with the Gemini API. Native Kotlin, Android 8.0+, no third-party runtime libraries, and a release APK of about 110 KB.
+Built with the Gemini API. Native Kotlin, Android 8.0+, no third-party runtime libraries, and a release APK of about 120 KB.
 
 **Status (2026-11-06):** v0.1 is running on a real phone, but its testing isn't finished. See [the test checklist](docs/TESTING.md) for what has passed and what is left.
 
@@ -49,14 +49,18 @@ Use a key from Google AI Studio in **its own project with billing on**, and set 
 1. She taps the face and asks out loud, or types.
 2. Her words go to Gemini **without the screen**. Lists, reminders and chat never send the screen.
 3. If she needs help on the phone, Saathi reads the allowed app into a numbered list of elements and masks private values.
-4. Gemini replies with one JSON step: which element number to point at and what to say.
-5. The character moves beside the target, a ring and arrow highlight it, and the line is spoken. The panel shrinks to a slim strip so the app stays visible.
-6. She does the action herself. When the screen changes, Saathi reads it again and gives the next step.
+4. Each request carries a small state object (her goal, the last step, the screen's app and whether it changed, a pending question, the last thing saved) and the last 4 turns of masked chat. Gemini replies with one JSON object: an intent, a confidence, the line to say, the element number to point at, and a `state_patch` with only the fields that changed.
+5. The app checks the reply. An invalid reply, or an element number that isn't on the screen list, gets one retry with the reason. A list or reminder change with confidence below 0.6 is not saved. Saathi asks "Maine suna: … Sahi hai?" first.
+6. The character moves beside the target, a ring and arrow highlight it, and the line is spoken. The panel shrinks to a slim strip so the app stays visible.
+7. She does the action herself. When the screen changes, Saathi reads it again and gives the next step.
 
 | File | Job |
 | --- | --- |
 | `SaathiAccessibilityService` | Read-only access and overlay host. `allowedRoot()` is the only way to reach screen content |
-| `Assistant` | The guide loop, session state and chat memory. Privacy checks run first |
+| `Assistant` | The guide loop. It checks each reply, merges the state patch and runs the action. Privacy checks run first |
+| `core/SessionState` | The state sent with each request, and the rules for merging the model's patch |
+| `core/AiReply` | The reply contract and its validation |
+| `EvalLog` | The optional on-device log of turns for building test cases |
 | `ScreenReader` | Screen to numbered list, with masking |
 | `core/PrivacyFilter` | Rules for secrets, payments, scams and number masking |
 | `core/Allowlist` | The apps Saathi may read |
@@ -81,13 +85,15 @@ Use a key from Google AI Studio in **its own project with billing on**, and set 
 | Filters her speech | Runs of 4 or more digits become `[number]`, including spoken words such as "ek do teen char" |
 | Warns about scams | Remote-access apps, collect requests and requests to share a code |
 | Ignores instructions on screen | Screen text is marked as data for the model, and a live test ignored a fake instruction to ask for her UPI PIN. The model has no way to act anyway |
-| Limits what is kept | Each request asks Google not to store it (`store: false`). Screen data and her words are never logged or saved to disk |
+| Limits what is kept | Each request asks Google not to store it (`store: false`). Screen data is never logged or saved to disk. Her words are saved only if the testing log is switched on in setup, and then only masked |
+| Keeps the state free of screen text | The state is built after masking. Its one screen field, the masked title, is sent only with turns that send the screen list anyway, and is left out of the testing log |
 
 ### Which apps Saathi can read
 
 | Status | Apps |
 | --- | --- |
 | Allowed | Google Pay, Settings, home and recent apps, YouTube, Play Store, ChatGPT, Gemini, Clock, Calculator, Google Maps |
+| Found on each phone | That phone's own preinstalled Clock, Calculator and home screen apps, because makers such as Vivo name them differently. Only system apps count, and assistant, messaging and banking apps are never added. `adb logcat -d \| grep SaathiAllowlist` shows what was found |
 | Never allowed | WhatsApp, Messages/SMS, Truecaller, email, bank apps, notification shade |
 | Blocked by default | Everything else, including Chrome, Phone, Contacts, Gallery and Camera |
 
@@ -102,7 +108,8 @@ The [PRD](../Saathi%20—%20PRD%20On-screen%20Hindi%20assistant%20for%20parents.
 - **The allowlist alone is not enough.** The PRD originally said Android delivers nothing from other apps. That is true for events, but not for reading the active window, so the code checks the allowlist as well.
 - **Default model is `gemini-3.6-flash`, not `gemini-flash-latest`.** In testing on 2026-11-06 the alias and `gemini-3.8-flash` timed out or returned 503 on every call, while `gemini-3.6-flash` answered correctly in under 2 seconds with minimal thinking.
 - **The mic can reopen once after an answer.** Tapping before every sentence made conversation tiring. After an answer, it reopens for one follow-up with the green ring showing, and closes if she stays silent. It never reopens after a guide step, on a secret screen or after typing, and setup can turn this off. There is still no wake word and no always-on listening.
-- **Chat is remembered for 30 minutes.** Her masked words and Saathi's replies stay in memory on the phone, with no screen data, so a closed panel or dark screen does not lose her place.
+- **A small state replaces the chat history.** Each request sends the state and only the last 4 turns. A goal ends after 10 minutes idle, when she says "rehne do" or taps ×, when it is done, or after 2 minutes in an unrelated app. The last saved item and the chat are kept for 30 minutes, in memory only, so "aur Maggi bhi" still works later.
+- **Optional testing log.** Off by default. When switched on in setup, each turn is saved on the phone: her masked words, the state, the reply, validation and timing, with no screen text. A "Galat tha" button marks a wrong reply, and the marked turns are pulled over USB.
 - **Clock, Calculator and Google Maps are also allowed.** In Clock and Calculator a number pad alone does not hide Saathi, while every other secret check still applies. During a help session, alarm names and places shown in Maps can go to Gemini.
 - **Alarms are taught, not set.** Saathi's reminders are its own and are separate from the Clock app. If she asks for an alarm, Saathi guides her through Clock. A code check stops an alarm request turning into a reminder.
 - **Two versions of every line.** Hindi text-to-speech mispronounces Roman Hinglish, so Gemini returns Roman text for the bubble and Devanagari for the voice.

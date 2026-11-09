@@ -140,6 +140,9 @@ class MainActivity : Activity() {
         root.addView(heading("5. About her"))
         root.addView(aboutCard())
 
+        root.addView(heading("6. Testing (optional)"))
+        root.addView(testingCard())
+
         root.addView(heading("Lists and reminders"))
         root.addView(
             primaryButton("Open lists and reminders") { startActivity(Intent(this, ListsActivity::class.java)) },
@@ -229,8 +232,8 @@ class MainActivity : Activity() {
     private fun testGemini() {
         geminiStatus.text = "Testing..."
         GeminiClient(prefs).ask(
-            "Current time: test\nScreen access: none\nShe said: \"Namaste, aap kaun ho?\"",
-            emptyList(),
+            "CONTEXT\nCurrent time: test\n\nSTATE:\n{\"turn\":1,\"goal\":null,\"screen\":{\"app\":\"setup\",\"readable\":false}}\n\n" +
+                "HISTORY (oldest first):\nnone\n\nHER WORDS: \"Namaste, aap kaun ho?\"",
             null,
         ) { result ->
             geminiStatus.text = when (result) {
@@ -365,6 +368,37 @@ class MainActivity : Activity() {
                 Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show()
             },
             wrapWithGap(10),
+        )
+        return card
+    }
+
+    /** The eval log: off by default, and only for testing on her phone. */
+    private fun testingCard(): View {
+        val card = card()
+        val log = EvalLog(this, prefs)
+        card.addView(
+            body(
+                "Save each turn on this phone to build test cases: her words with numbers masked, Saathi's state and reply, and timing. " +
+                    "No screen text is saved. A \"Galat tha\" button appears on the panel to mark a wrong reply. Turn this off before handing the phone over."
+            )
+        )
+        card.addView(
+            CheckBox(this).apply {
+                text = "Save turns for testing"
+                isChecked = prefs.evalLog
+                setOnCheckedChangeListener { _, checked -> prefs.evalLog = checked }
+            },
+            wrapWithGap(6),
+        )
+        log.folder?.let { folder ->
+            card.addView(body("Copy the marked turns over USB:\nadb pull $folder/${EvalLog.MARKED_FILE}"), wrapWithGap(6))
+        }
+        card.addView(
+            primaryButton("Delete saved turns", 0xFF5C6B73.toInt()) {
+                log.clear()
+                Toast.makeText(this, "Deleted", Toast.LENGTH_SHORT).show()
+            },
+            wrapWithGap(8),
         )
         return card
     }

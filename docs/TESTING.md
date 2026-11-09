@@ -2,6 +2,14 @@
 
 Test phone: Vivo V2250, Android 15, Funtouch OS 15. Last updated 2026-11-06.
 
+## Suggested order for the next session
+
+1. **Set up the paid key:** add it, rebuild, then tap **Save and test**. See [Before testing](#before-testing). That is also test 22, the first check of the new reply format.
+2. **Tests 1–4, PIN hiding.** Stop if any of them fails.
+3. **Test 5, GPay bank account.** Screen-record it, ideally with your mom doing it. That recording is the buildathon demo video.
+4. **Tests 14, 10 and 7:** OTP filter, sound finder and lists. These are quick and show well.
+5. **Test 15, restart.** Then let test 16, the 7-day reminder, run in the background.
+
 ## Before testing
 
 1. **Create a paid Gemini key** in its own AI Studio project, as described in the [README](../README.md#gemini-key).
@@ -42,7 +50,7 @@ This should show `hidden=true`, then `hidden=false`.
 | # | Test | Expected | Status |
 | --- | --- | --- | --- |
 | 5 | Add a bank account in GPay, the main goal | Each step points at the right button, and Saathi hides before the PIN | ⬜ |
-| 6 | Clock: "Subah 8 baje ka alarm kaise lagaun?" | Guides her through Clock and never says it is already set | ⬜ Fix installed, not retested |
+| 6 | Clock: "Subah 8 baje ka alarm kaise lagaun?". First check `adb logcat -d \| grep SaathiAllowlist` lists the Vivo Clock app | Guides her through Clock and never says it is already set | ⬜ Fix installed, not retested |
 | 7 | "Doodh list mein daal do", then "Aur do packet Maggi bhi", then "Shopping list kya hai?" | Follow-ups need no tap, and it reads both items back | ⬜ Not retested |
 | 8 | Stay silent after an answer | Mic closes, then the panel closes by itself | ⬜ Not retested |
 | 9 | Follow a guided step | Slim strip that does not hide the app, and it moves on after she taps | ⬜ Not retested |
@@ -54,6 +62,16 @@ This should show `hidden=true`, then `hidden=false`.
 | 15 | Set a daily reminder, then restart the phone | Fires on time after the restart | ⬜ |
 | 16 | Keep a daily reminder running for 7 days | Fires on time each day | ⬜ |
 | 17 | Log step times with `adb logcat -d \| grep SaathiGemini` | Replies arrive within 4 seconds on the paid key | ⬜ |
+| 18 | Your mom does test 5 while you stay silent. Note where she hesitates | She can follow each step without your help | ⬜ |
+| 19 | Swipe Saathi away from recent apps and leave the phone idle for a few hours. Funtouch OS is aggressive about closing apps, even with battery optimisation off | Face and reminders still work | ⬜ |
+| 20 | Turn on airplane mode and ask something | The fixed offline lines answer, not an error | ⬜ |
+| 21 | Repeat the fake on-screen instruction test through the app on the phone. It has only passed from the Mac so far | Ignores the instruction and never asks for her UPI PIN | ⬜ |
+| 22 | First request on the new reply format: "Namaste" and tap **Save and test** in setup | Answers normally. If `adb logcat -d \| grep SaathiGemini` shows "trying compatibility level", Gemini refused the new schema | ⬜ |
+| 23 | "Doodh khatam ho gaya", then "list mein" | Asks list or reminder first, then adds doodh without asking again | ⬜ |
+| 24 | During the GPay goal, tap Scan QR instead of the pointed button | Notices the wrong screen and guides her back | ⬜ |
+| 25 | During the GPay goal, ask for a medicine reminder at 9 pm | Sets the reminder. Saying "GPay wala kaam" later starts that goal again | ⬜ |
+| 26 | Have someone send a collect request, then open it in GPay | Warns about a scam on that screen, not just "payment screen" | ⬜ |
+| 27 | Turn on the testing log, use Saathi, tap **Galat tha**, then `adb pull` the path shown in setup | `marked.jsonl` has that turn, with masked words and no screen text | ⬜ |
 
 ## Already passed
 

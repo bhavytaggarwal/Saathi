@@ -22,6 +22,8 @@ data class ScreenSnapshot(
     val scam: Boolean,
     val elements: List<ScreenElement>,
     val needsScreenshot: Boolean,
+    /** The highest plain-text label, already masked. Sent only together with the element list. */
+    val title: String? = null,
 ) {
     val labels: Set<String> = elements.filter { it.tappable }.map { it.label }.toSet()
 
@@ -44,6 +46,9 @@ data class ScreenSnapshot(
     }
 }
 
+/** The result of the on-device check. scam is only worked out on payment screens. */
+data class PrivacyCheck(val secret: Boolean, val payment: Boolean, val scam: Boolean)
+
 /** Walks the accessibility tree read-only and turns it into plain data. */
 object ScreenReader {
     private const val MAX_NODES = 900
@@ -52,6 +57,7 @@ object ScreenReader {
     private const val MAX_LAUNCHER_ELEMENTS = 40
     private const val MAX_LABEL = 80
     private const val MAX_LAUNCHER_LABEL = 30
+    private const val MAX_TITLE = 40
     private const val NO_LABEL = "(no label)"
 
     private class Raw(val facts: NodeFacts, val className: String, val bounds: Rect, val tappable: Boolean)
@@ -92,9 +98,10 @@ object ScreenReader {
     }
 
     /** The on-device check used even when resting. It keeps nothing and sends nothing. */
-    fun checkPrivacy(root: AccessibilityNodeInfo, pkg: String): Pair<Boolean, Boolean> {
+    fun checkPrivacy(root: AccessibilityNodeInfo, pkg: String): PrivacyCheck {
         val facts = collect(root).map { it.facts }
-        return hasSecret(facts, pkg) to PrivacyFilter.isPaymentScreen(facts)
+        val payment = PrivacyFilter.isPaymentScreen(facts)
+        return PrivacyCheck(hasSecret(facts, pkg), payment, payment && PrivacyFilter.isScamScreen(facts))
     }
 
     private fun hasSecret(facts: List<NodeFacts>, pkg: String) =
@@ -106,12 +113,10 @@ object ScreenReader {
         val facts = raw.map { it.facts }
         if (hasSecret(facts, pkg)) return ScreenSnapshot(pkg, true, false, false, emptyList(), false)
 
+        // Worked out before the payment check: a collect request is a payment screen and a scam.
+        val scam = PrivacyFilter.isScamScreen(facts)
         val payment = PrivacyFilter.isPaymentScreen(facts)
-        if (payment) return ScreenSnapshot(pkg, false, true, false, emptyList(), false)
-
-        val scam = facts.any { node ->
-            listOfNotNull(node.text, node.description).any(PrivacyFilter::looksLikeScam)
-        }
+        if (payment) return ScreenSnapshot(pkg, false, true, scam, emptyList(), false)
         val launcher = Allowlist.isLauncher(pkg)
         val maxElements = if (launcher) MAX_LAUNCHER_ELEMENTS else MAX_ELEMENTS
         val maxLabel = if (launcher) MAX_LAUNCHER_LABEL else MAX_LABEL
@@ -168,6 +173,7 @@ object ScreenReader {
             scam = scam,
             elements = elements,
             needsScreenshot = !launcher && (mostlyUnlabeled || tooLittle),
+            title = elements.filter { !it.tappable }.minByOrNull { it.bounds.top }?.label?.take(MAX_TITLE),
         )
     }
 
