@@ -48,6 +48,11 @@ object Lines {
         "Mera setup abhi poora nahi hua. Bete se API key daalne ko kahiye.",
         "मेरा setup अभी पूरा नहीं हुआ। बेटे से API key डालने को कहिए।",
     )
+    /** The Gemini project has no credit left, so trying again will not help. */
+    val NO_CREDIT = Line(
+        "Abhi main jawab nahi de paa rahi. Bete se kahiye ki Saathi ka setup check karein.",
+        "अभी मैं जवाब नहीं दे पा रही। बेटे से कहिए कि साथी का setup check करें।",
+    )
     val AI_ERROR = Line(
         "Koi baat nahi, phir se karte hain. Ek baar aur boliye.",
         "कोई बात नहीं, फिर से करते हैं। एक बार और बोलिए।",

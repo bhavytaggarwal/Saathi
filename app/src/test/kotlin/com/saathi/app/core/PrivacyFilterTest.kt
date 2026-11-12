@@ -70,6 +70,13 @@ class PrivacyFilterTest {
         assertTrue(PrivacyFilter.hasSecret(keypad))
     }
 
+    @Test fun namesWhyAScreenIsSecretWithoutScreenText() {
+        assertEquals("password_field", PrivacyFilter.secretReason(listOf(NodeFacts(isPassword = true))))
+        assertEquals("prompt_text", PrivacyFilter.secretReason(listOf(NodeFacts(text = "ENTER UPI PIN"))))
+        assertEquals("number_pad", PrivacyFilter.secretReason((0..9).map { NodeFacts(text = it.toString(), isClickable = true) }))
+        assertNull(PrivacyFilter.secretReason(listOf(NodeFacts(text = "Add bank account", isClickable = true))))
+    }
+
     @Test fun clockAndCalculatorKeepNumberPadsButStillHideOnRealSecrets() {
         val keypad = (0..9).map { NodeFacts(text = it.toString(), isClickable = true) }
         listOf("com.android.deskclock", "com.vivo.calculator").forEach { pkg ->

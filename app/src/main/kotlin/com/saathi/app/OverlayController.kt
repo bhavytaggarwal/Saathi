@@ -358,6 +358,14 @@ class OverlayController(private val service: AccessibilityService, private val p
         updatePanelRows()
     }
 
+    /**
+     * Keeps the screen on while she is in a help session. Phones often turn the screen off after
+     * 30 seconds, which is shorter than listening to a step and finding the button.
+     */
+    fun setKeepScreenOn(on: Boolean) {
+        panel.keepScreenOn = on
+    }
+
     fun showEvalButton(show: Boolean) {
         evalShown = show
         updatePanelRows()

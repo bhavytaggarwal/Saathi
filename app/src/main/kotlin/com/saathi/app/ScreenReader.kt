@@ -46,8 +46,18 @@ data class ScreenSnapshot(
     }
 }
 
-/** The result of the on-device check. scam is only worked out on payment screens. */
-data class PrivacyCheck(val secret: Boolean, val payment: Boolean, val scam: Boolean)
+/**
+ * The result of the on-device check. scam is only worked out on payment screens. namedButtons
+ * counts tappable elements with a label, which a lock screen that draws no text does not have.
+ */
+data class PrivacyCheck(
+    val secretReason: String?,
+    val payment: Boolean,
+    val scam: Boolean,
+    val namedButtons: Int,
+) {
+    val secret: Boolean get() = secretReason != null
+}
 
 /** Walks the accessibility tree read-only and turns it into plain data. */
 object ScreenReader {
@@ -99,9 +109,12 @@ object ScreenReader {
 
     /** The on-device check used even when resting. It keeps nothing and sends nothing. */
     fun checkPrivacy(root: AccessibilityNodeInfo, pkg: String): PrivacyCheck {
-        val facts = collect(root).map { it.facts }
+        val raw = collect(root)
+        val facts = raw.map { it.facts }
         val payment = PrivacyFilter.isPaymentScreen(facts)
-        return PrivacyCheck(hasSecret(facts, pkg), payment, payment && PrivacyFilter.isScamScreen(facts))
+        val reason = PrivacyFilter.secretReason(facts, numberPadMeansSecret = !Allowlist.hasOrdinaryNumberPad(pkg))
+        val named = raw.count { it.tappable && !(it.facts.text ?: it.facts.description).isNullOrBlank() }
+        return PrivacyCheck(reason, payment, payment && PrivacyFilter.isScamScreen(facts), named)
     }
 
     private fun hasSecret(facts: List<NodeFacts>, pkg: String) =

@@ -13,7 +13,8 @@ import java.util.concurrent.Executors
 
 /** Calls the Gemini API directly. It has no tools, so the model can only name an element to point at. */
 class GeminiClient(private val prefs: Prefs) {
-    enum class Failure { NO_KEY, BAD_KEY, NETWORK, QUOTA, BLOCKED, BAD_REPLY, SERVER }
+    /** NO_CREDIT is HTTP 402: the project's prepaid credits are used up, so no model will answer. */
+    enum class Failure { NO_KEY, BAD_KEY, NETWORK, QUOTA, NO_CREDIT, BLOCKED, BAD_REPLY, SERVER }
 
     sealed interface Result {
         val model: String?
@@ -64,8 +65,13 @@ class GeminiClient(private val prefs: Prefs) {
             val started = System.currentTimeMillis()
             val result = run(request, key, model, prompt, jpegBase64)
             val took = System.currentTimeMillis() - started
-            // Timing and outcome only. Screen text and her words are never logged here.
-            Log.i(TAG, "reply in $took ms: ${result::class.simpleName}")
+            // Timing and outcome only. Screen text and her words are never logged here. Names are
+            // written out, because the release build shortens class names.
+            val outcome = when (result) {
+                is Result.Ok -> "ok"
+                is Result.Failed -> result.failure.name
+            }
+            Log.i(TAG, "reply in $took ms: $outcome, model ${result.model}")
             val timed = when (result) {
                 is Result.Ok -> result.copy(latencyMs = took)
                 is Result.Failed -> result.copy(latencyMs = took)
@@ -98,7 +104,7 @@ class GeminiClient(private val prefs: Prefs) {
                     if (candidate == model && model != FALLBACK_MODEL) {
                         primaryDownUntil = System.currentTimeMillis() + PRIMARY_COOLDOWN_MS
                     }
-                    Log.w(TAG, "model unavailable, trying the next one")
+                    Log.w(TAG, "$candidate unavailable (${outcome.failure}), trying the next one")
                 }
             }
         }
@@ -120,6 +126,8 @@ class GeminiClient(private val prefs: Prefs) {
                 if (request != latestRequest) return Attempt.Finished(Result.Failed(Failure.NETWORK, model = model))
                 return Attempt.TryNext(Failure.NETWORK)
             }
+            // The status code only, so the log shows why a model failed.
+            if (response.code != 200) Log.w(TAG, "$model answered HTTP ${response.code}")
             when {
                 response.code == 200 -> {
                     compatibility[model] = level
@@ -137,6 +145,8 @@ class GeminiClient(private val prefs: Prefs) {
                 }
                 response.code == 401 || response.code == 403 ->
                     return Attempt.Finished(Result.Failed(Failure.BAD_KEY, model = model))
+                // Billing is per project, so the other model would fail the same way.
+                response.code == 402 -> return Attempt.Finished(Result.Failed(Failure.NO_CREDIT, model = model))
                 response.code == 404 -> return Attempt.TryNext(Failure.BAD_KEY)
                 response.code == 429 -> return Attempt.TryNext(Failure.QUOTA)
                 else -> return Attempt.TryNext(Failure.SERVER)

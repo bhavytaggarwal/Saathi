@@ -62,6 +62,10 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     private var secureScreenPkg: String? = null
     private var lastScanAt = 0L
 
+    // While hidden, when the screen first looked clear. Saathi comes back only once it has stayed
+    // clear for UNHIDE_AFTER_MS, because a prompt can briefly report the app behind it as active.
+    private var clearSince = 0L
+
     // The help session she started by tapping: the panel and the guide loop.
     private var sessionActive = false
     private var generation = 0
@@ -212,6 +216,8 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     private fun noteScreenClass(pkg: String, className: String?) {
         val name = className.orEmpty()
         if (SECURE_SCREEN.containsMatchIn(name)) {
+            // Class and package names only, never screen content.
+            if (secureScreenPkg != pkg) Log.i(TAG, "lock screen class $name in $pkg")
             secureScreenPkg = pkg
         } else if (secureScreenPkg != pkg || (name.isNotEmpty() && !name.startsWith("android."))) {
             // Android's own view classes also appear here, and they do not mean the screen changed.
@@ -225,7 +231,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         if (active == service.packageName) return
         if (active == Allowlist.SYSTEM_UI) {
             // Never readable, and it can be Android's PIN or fingerprint prompt, so she steps back.
-            applyPrivacy(secret = true, payment = paymentOnScreen, announce = false, scam = scamOnPaymentScreen)
+            applyPrivacy(secret = true, payment = paymentOnScreen, announce = false, scam = scamOnPaymentScreen, reason = "system_window")
             return
         }
         if (active != secureScreenPkg) secureScreenPkg = null
@@ -236,7 +242,15 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
             return
         }
         val check = ScreenReader.checkPrivacy(allowed.first, allowed.second)
-        applyPrivacy(check.secret || secureScreenPkg != null, check.payment, scam = check.scam)
+        // A lock screen is remembered by its class name, and some apps report the next screen with
+        // a generic Android class name that never clears it. Ordinary named buttons and no secret
+        // mean the lock screen has gone.
+        if (secureScreenPkg != null && !check.secret && check.namedButtons >= ORDINARY_SCREEN_BUTTONS) {
+            Log.i(TAG, "lock screen gone in $active")
+            secureScreenPkg = null
+        }
+        val reason = check.secretReason ?: if (secureScreenPkg != null) "lock_screen_class" else null
+        applyPrivacy(reason != null, check.payment, scam = check.scam, reason = reason)
     }
 
     private fun onTick() {
@@ -277,13 +291,35 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         refresh()
     }
 
-    /** scam is only meaningful together with payment: a collect request is both. */
-    private fun applyPrivacy(secret: Boolean, payment: Boolean, announce: Boolean = true, scam: Boolean = false) {
-        if (secret != secretOnScreen) {
-            secretOnScreen = secret
-            // State only, never screen content, so this log can show whether hiding worked.
-            Log.i(TAG, "hidden=$secret")
-            if (secret) enterSecretMode(announce) else leaveSecretMode()
+    /**
+     * scam is only meaningful together with payment: a collect request is both. reason is a fixed
+     * word for the log. Hiding is immediate. Coming back waits until the screen has stayed clear
+     * for UNHIDE_AFTER_MS, so the face never flickers over a prompt.
+     */
+    private fun applyPrivacy(
+        secret: Boolean,
+        payment: Boolean,
+        announce: Boolean = true,
+        scam: Boolean = false,
+        reason: String? = null,
+    ) {
+        if (secret) clearSince = 0L
+        if (secret && !secretOnScreen) {
+            secretOnScreen = true
+            // State and a fixed reason only, never screen content.
+            Log.i(TAG, "hidden=true reason=${reason ?: "screen_secret"}")
+            enterSecretMode(announce)
+        } else if (!secret && secretOnScreen) {
+            val now = now()
+            if (clearSince == 0L) clearSince = now
+            if (now - clearSince < UNHIDE_AFTER_MS) {
+                // Checked again on the next tick, which runs every half second while hidden.
+                return
+            }
+            clearSince = 0L
+            secretOnScreen = false
+            Log.i(TAG, "hidden=false")
+            leaveSecretMode()
         }
         val paymentScam = payment && scam
         val scamAppeared = paymentScam && !scamOnPaymentScreen
@@ -360,6 +396,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         overlay.setMessage("Boliye, main sun rahi hoon.")
         overlay.showReminderButtons(shownReminder != null)
         overlay.showEvalButton(prefs.evalLog)
+        overlay.setKeepScreenOn(true)
         touchIdle()
         refresh()
     }
@@ -381,6 +418,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         listOf(settle, waitingLine, idleEnd, autoClose).forEach(main::removeCallbacks)
         overlay.setMood(Mood.RESTING)
         overlay.setSessionBadge(false)
+        overlay.setKeepScreenOn(false)
         overlay.returnHome()
         refresh()
     }
@@ -780,6 +818,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
                 say(
                     when (result.failure) {
                         GeminiClient.Failure.NO_KEY, GeminiClient.Failure.BAD_KEY -> Lines.NO_KEY
+                        GeminiClient.Failure.NO_CREDIT -> Lines.NO_CREDIT
                         GeminiClient.Failure.NETWORK -> Lines.NO_INTERNET
                         GeminiClient.Failure.BAD_REPLY -> Lines.RETRY_FAILED
                         else -> Lines.AI_ERROR
@@ -1293,6 +1332,8 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         const val MIN_CONFIDENCE = 0.6
         const val SAME_SCREEN = 0.6
         const val NEARLY_IDENTICAL = 0.92
+        const val UNHIDE_AFTER_MS = 1000L
+        const val ORDINARY_SCREEN_BUTTONS = 3
 
         val REPEAT = Regex("phir se|fir se|dobara|repeat|फिर से|दोबारा")
         val SLOWER = Regex("dheere|dheme|slow|धीरे")

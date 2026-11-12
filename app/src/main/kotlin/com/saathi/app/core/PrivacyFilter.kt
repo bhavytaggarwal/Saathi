@@ -102,27 +102,34 @@ object PrivacyFilter {
     )
 
     /** True when the screen is asking for a secret. Saathi must then hide and send nothing. */
-    fun hasSecret(nodes: List<NodeFacts>, numberPadMeansSecret: Boolean = true): Boolean {
+    fun hasSecret(nodes: List<NodeFacts>, numberPadMeansSecret: Boolean = true): Boolean =
+        secretReason(nodes, numberPadMeansSecret) != null
+
+    /**
+     * Why the screen counts as asking for a secret, or null if it doesn't. The reason is a fixed
+     * word, never screen text, so it can be logged.
+     */
+    fun secretReason(nodes: List<NodeFacts>, numberPadMeansSecret: Boolean = true): String? {
         val keypadDigits = HashSet<String>()
         for (node in nodes) {
-            if (node.isPassword) return true
+            if (node.isPassword) return "password_field"
             if (node.isEditable) {
                 // The typed value is deliberately not checked or kept, only what labels the field.
                 val labels = listOfNotNull(node.hint, node.description, node.viewId)
                     .joinToString(" ")
                     .replace('_', ' ')
                     .replace('/', ' ')
-                if (SECRET_FIELD.containsMatchIn(labels)) return true
+                if (SECRET_FIELD.containsMatchIn(labels)) return "labelled_field"
             }
             val shown = listOfNotNull(node.text, node.description, node.hint)
-            if (shown.any { SECRET_PROMPT.containsMatchIn(it) }) return true
+            if (shown.any { SECRET_PROMPT.containsMatchIn(it) }) return "prompt_text"
             if (node.isClickable) {
                 shown.firstOrNull { it.trim().length == 1 && it.trim()[0].isDigit() }
                     ?.let { keypadDigits += it.trim() }
             }
         }
         // A number pad drawn by the app, as custom PIN screens do.
-        return numberPadMeansSecret && keypadDigits.size >= 9
+        return if (numberPadMeansSecret && keypadDigits.size >= 9) "number_pad" else null
     }
 
     private val PAYMENT = Regex(

@@ -243,6 +243,7 @@ class MainActivity : Activity() {
                     GeminiClient.Failure.BAD_KEY -> "❌ Google refused this key or model. Check both."
                     GeminiClient.Failure.NETWORK -> "❌ No internet."
                     GeminiClient.Failure.QUOTA -> "❌ Quota or spending limit reached."
+                    GeminiClient.Failure.NO_CREDIT -> "❌ The key works, but its project has no credits left. Add credits in AI Studio under Billing."
                     else -> "❌ Gemini gave an unexpected reply: ${result.failure}. Try again."
                 }
             }
