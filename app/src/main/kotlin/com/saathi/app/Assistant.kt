@@ -2,6 +2,7 @@ package com.saathi.app
 
 import android.app.KeyguardManager
 import android.content.BroadcastReceiver
+import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
@@ -9,17 +10,32 @@ import android.graphics.Rect
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.PowerManager
+import android.provider.Settings
 import android.util.Log
+import android.view.ViewGroup
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityManager
+import android.view.accessibility.AccessibilityNodeInfo
 import com.saathi.app.core.AiReply
 import com.saathi.app.core.Allowlist
+import com.saathi.app.core.Box
+import com.saathi.app.core.Control
+import com.saathi.app.core.ControlsOnly
+import com.saathi.app.core.Guide
+import com.saathi.app.core.GuideRunner
+import com.saathi.app.core.GuideScreen
+import com.saathi.app.core.Guides
 import com.saathi.app.core.Goal
 import com.saathi.app.core.LastAction
 import com.saathi.app.core.LastStep
 import com.saathi.app.core.Line
 import com.saathi.app.core.Lines
+import com.saathi.app.core.ListenPolicy
 import com.saathi.app.core.ListItem
+import com.saathi.app.core.LocalAction
+import com.saathi.app.core.LocalCommandParser
 import com.saathi.app.core.PendingQuestion
 import com.saathi.app.core.PrivacyFilter
 import com.saathi.app.core.ReplyAction
@@ -39,18 +55,22 @@ import kotlin.math.abs
  * returns a state_patch, and this class is the referee: it validates the reply, merges the patch,
  * runs the action and keeps everything it can observe for itself.
  */
-class Assistant(private val service: SaathiAccessibilityService) : OverlayController.Callbacks, VoiceIO.Listener {
+class Assistant(private val context: Context) : OverlayController.Callbacks, VoiceIO.Listener {
+    private val service: SaathiAccessibilityService?
+        get() = (context as? SaathiAccessibilityService) ?: SaathiAccessibilityService.instance
     private val main = Handler(Looper.getMainLooper())
-    private val prefs = Prefs(service)
-    private val overlay = OverlayController(service, prefs, this)
-    private val voice = VoiceIO(service, prefs)
+    private val prefs = Prefs(context)
+    private val overlay = OverlayController(context, prefs, this)
+    private val voice = VoiceIO(context, prefs)
     private val gemini = GeminiClient(prefs)
-    private val lists = ListsStore(service)
-    private val reminders = ReminderScheduler(service)
-    private val phone = PhoneHelp(service)
-    private val evalLog = EvalLog(service, prefs)
-    private val keyguard = service.getSystemService(KeyguardManager::class.java)
-    private val power = service.getSystemService(PowerManager::class.java)
+    private val lists = ListsStore(context)
+    private val reminders = ReminderScheduler(context)
+    private val phone = PhoneHelp(context)
+    private val evalLog = EvalLog(context, prefs)
+    private val keyguard = context.getSystemService(KeyguardManager::class.java)
+    private val power = context.getSystemService(PowerManager::class.java)
+    private var receiverRegistered = false
+    private var steppingOutForBanking = false
 
     // What is on the phone right now.
     private var currentPkg: String? = null
@@ -62,6 +82,19 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     private var secureScreenPkg: String? = null
     private var lastScanAt = 0L
 
+    // Ask-first apps such as WhatsApp. access decides whether they may be read. The rest is
+    // bookkeeping: her words waiting for her answer, a payment screen known by its class name,
+    // and when the allowed app last sent an event, for checking the screen directly without them.
+    private val access = Allowlist.access
+    private var consentWords: String? = null
+    private var paymentClassPkg: String? = null
+    private var lastAccessEventAt = 0L
+    private var lastPollAt = 0L
+    private var pollingLogged = false
+
+    // A prepared guide running on the phone. It lives and ends with the goal.
+    private var guide: GuideRunner? = null
+
     // While hidden, when the screen first looked clear. Saathi comes back only once it has stayed
     // clear for UNHIDE_AFTER_MS, because a prompt can briefly report the app behind it as active.
     private var clearSince = 0L
@@ -72,6 +105,8 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     private var lastLine: Line? = null
     private var linesSaid = 0
     private var lastSnapshot: ScreenSnapshot? = null
+    private var lastTraceId: String? = null
+    private var lastUtterance: String? = null
     private var previousLabels: Set<String> = emptySet()
     private var targetLabel: String? = null
     private var targetGesture = "none"
@@ -84,6 +119,13 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     // The mic reopened by itself for one follow-up, which is not the same as her tapping.
     private var followUpOpen = false
     private var lastInputTyped = false
+
+    // Saathi asked her something and the mic should reopen when the line ends. The watchdog in
+    // onTick() reopens it if the speech engine never reported the end.
+    private var expectingAnswer = false
+
+    // When she last spoke, so her words come before the guide moving on by itself.
+    private var lastHeardAt = 0L
 
     // Limits automatic follow-up calls, so an odd reply cannot loop and spend money.
     private var followUps = 0
@@ -100,6 +142,10 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     // Apps a guided goal has been shown in, and when she was last in one of them.
     private val goalPkgs = HashSet<String>()
     private var lastOnGoalAppAt = 0L
+    private var subGoalCompletedAt = 0L
+    private var activeTimeoutRunnable: Runnable? = null
+    private var deferredForLoading = false
+    private var lastSentWithScreenshot = false
 
     private class Exchange(val her: String?, val saathi: String)
 
@@ -149,8 +195,11 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         }
     }
 
-    fun start() {
+    fun start(announceConnected: Boolean = false) {
+        prefs.pausedForBanking = false
+        prefs.onboardingCompleted = true
         overlay.attach()
+        overlay.showEnableAccessibilityCard(false)
         voice.onSpeakingChanged = { speaking ->
             overlay.setMood(
                 when {
@@ -160,7 +209,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
                 }
             )
         }
-        service.registerReceiver(
+        context.registerReceiver(
             screenReceiver,
             IntentFilter().apply {
                 addAction(Intent.ACTION_SCREEN_OFF)
@@ -168,18 +217,95 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
                 addAction(Intent.ACTION_USER_PRESENT)
             },
         )
+        receiverRegistered = true
         locked = keyguard.isKeyguardLocked
         refresh()
         if (power.isInteractive) main.post(tick)
+        if (announceConnected) {
+            voice.speak(Lines.ACCESSIBILITY_CONNECTED_SPEECH)
+        }
         // Covers a service restart: anything due while it was away fires now.
         reminders.restoreAll()
     }
 
-    fun shutdown() {
-        main.removeCallbacksAndMessages(null)
-        runCatching { service.unregisterReceiver(screenReceiver) }
+    /**
+     * Mounts the assistant panel inside [MainActivity] when Accessibility is disabled so all
+     * voice-only features (lists, reminders, alarms, scam checks, bank_text_help) work without
+     * nagging, and shows the 1-tap re-enable card only if a turn needs live screen guidance.
+     */
+    fun startInApp(container: ViewGroup) {
+        overlay.attachInApp(container)
+        overlay.showEnableAccessibilityCard(false)
+        voice.onSpeakingChanged = { speaking ->
+            overlay.setMood(
+                when {
+                    speaking -> Mood.SPEAKING
+                    sessionActive && awaitingReply -> Mood.THINKING
+                    else -> Mood.RESTING
+                }
+            )
+        }
+        startSession()
+    }
+
+    /**
+     * Automatic Bank Mode step-out for strict Indian banking apps (YONO SBI, HDFC, ICICI, Axis,
+     * Kotak, bob World, PNB One) before [SaathiAccessibilityService.disableSelf] is called:
+     * 1. Immediately hides and removes all floating overlays.
+     * 2. Saves pausedForBanking = true in SharedPreferences.
+     * 3. Speaks a calm Hindi reassurance via TTS that finishes cleanly after disableSelf().
+     */
+    fun stepOutForStrictBankApp(pkg: String, speech: String = Lines.BANK_STEP_OUT_SPEECH) {
+        steppingOutForBanking = true
+        prefs.pausedForBanking = true
+        generation++
         gemini.cancel()
-        voice.shutdown()
+        awaitingReply = false
+        followUpOpen = false
+        sessionActive = false
+        main.removeCallbacksAndMessages(null)
+        overlay.hideAll()
+        overlay.detach()
+        Log.i(TAG, "bank_mode=step_out pkg=$pkg pausedForBanking=true")
+        voice.speakAndShutdown(speech)
+    }
+
+    fun isAccessibilityEnabled(): Boolean {
+        if (service != null) {
+            if (prefs.pausedForBanking) prefs.pausedForBanking = false
+            return true
+        }
+        val manager = context.getSystemService(AccessibilityManager::class.java) ?: return false
+        val mine = ComponentName(context, SaathiAccessibilityService::class.java).flattenToString()
+        val enabled = Settings.Secure.getString(context.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES).orEmpty()
+        val active = manager.isEnabled && enabled.split(':').any { it.equals(mine, ignoreCase = true) }
+        if (active && prefs.pausedForBanking) prefs.pausedForBanking = false
+        return active
+    }
+
+    /**
+     * Triggered only when a turn requires live screen guidance (guide_step or alarm_teach needing
+     * screen access) and Accessibility is currently disabled. Shows the 1-tap re-enable card and
+     * automatically speaks the short Hindi instruction.
+     */
+    private fun promptEnableAccessibilityForScreenGuidance(words: String?) {
+        stopPointing()
+        overlay.showEnableAccessibilityCard(true)
+        say(Lines.ENABLE_ACCESSIBILITY_PROMPT)
+        remember(words, Lines.ENABLE_ACCESSIBILITY_PROMPT)
+    }
+
+    fun shutdown() {
+        accessEnded(access.reset(), "shutdown")
+        main.removeCallbacksAndMessages(null)
+        if (receiverRegistered) {
+            runCatching { context.unregisterReceiver(screenReceiver) }
+            receiverRegistered = false
+        }
+        gemini.cancel()
+        if (!steppingOutForBanking) {
+            voice.shutdown()
+        }
         overlay.detach()
     }
 
@@ -191,12 +317,52 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
 
     // Events and privacy. These run before anything else.
 
+    /**
+     * Immediate Banking & PII guardrail: pauses the AI overlay, cancels any in-flight request,
+     * and ignores all screen contents whenever a financial or secure app enters the foreground.
+     */
+    fun onSecureAppEntered(pkg: String) {
+        noteForeground(pkg)
+        applyPrivacy(secret = true, payment = true, announce = false, reason = "financial_or_secure_app")
+    }
+
+    /** Immediate guardrail when Android reports a FLAG_SECURE window (e.g. password/OTP/banking screen). */
+    fun onFlagSecureDetected() {
+        applyPrivacy(secret = true, payment = paymentOnScreen, announce = false, reason = "flag_secure_window")
+    }
+
     fun onEvent(type: Int, pkg: String, className: String?) {
-        // Second gate, in case events ever arrive from outside the allowlist.
+        if (Allowlist.isFinancialOrSecureApp(pkg)) {
+            onSecureAppEntered(pkg)
+            return
+        }
+        // Window state changes always run scanNow() so leaving the home screen for an ask-first or
+        // blocked app immediately clears the old pointer and asks consent when needed.
+        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            noteScreenClass(pkg, className)
+            if (Allowlist.isAskFirst(pkg) && Allowlist.isAllowed(pkg)) {
+                lastAccessEventAt = now()
+                access.touch(now())
+            }
+            main.removeCallbacks(privacyScan)
+            scanNow()
+            if (sessionActive && guiding && Allowlist.isAllowed(pkg)) {
+                main.removeCallbacks(settle)
+                main.postDelayed(settle, SETTLE_MS)
+            }
+            return
+        }
+        // Second gate: content and interaction events from unread apps are ignored.
         if (!Allowlist.isAllowed(pkg)) return
-        if (type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) noteScreenClass(pkg, className)
-        val urgent = type == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-            type == AccessibilityEvent.TYPE_VIEW_FOCUSED
+        if (Allowlist.isAskFirst(pkg)) {
+            lastAccessEventAt = now()
+            // Her own taps and focus changes keep the grant alive. Content arriving by itself, such
+            // as a new message, does not.
+            if (type == AccessibilityEvent.TYPE_VIEW_CLICKED || type == AccessibilityEvent.TYPE_VIEW_FOCUSED) {
+                access.touch(now())
+            }
+        }
+        val urgent = type == AccessibilityEvent.TYPE_VIEW_FOCUSED
         if (urgent) {
             main.removeCallbacks(privacyScan)
             scanNow()
@@ -215,6 +381,15 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     /** Credential screens are recognised by name, because some draw no readable text. */
     private fun noteScreenClass(pkg: String, className: String?) {
         val name = className.orEmpty()
+        if (Allowlist.isAskFirst(pkg)) {
+            if (PrivacyFilter.isPaymentScreenClass(name)) {
+                // Class and package names only, never screen content.
+                if (paymentClassPkg != pkg) Log.i(TAG, "payment screen class $name in $pkg")
+                paymentClassPkg = pkg
+            } else if (name.isNotEmpty() && !name.startsWith("android.")) {
+                paymentClassPkg = null
+            }
+        }
         if (SECURE_SCREEN.containsMatchIn(name)) {
             // Class and package names only, never screen content.
             if (secureScreenPkg != pkg) Log.i(TAG, "lock screen class $name in $pkg")
@@ -227,8 +402,12 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
 
     private fun scanNow() {
         lastScanAt = now()
-        val active = service.activePackage() ?: return
-        if (active == service.packageName) return
+        val active = service?.activePackage() ?: return
+        if (active == context.packageName) return
+        if (Allowlist.isFinancialOrSecureApp(active)) {
+            onSecureAppEntered(active)
+            return
+        }
         if (active == Allowlist.SYSTEM_UI) {
             // Never readable, and it can be Android's PIN or fingerprint prompt, so she steps back.
             applyPrivacy(secret = true, payment = paymentOnScreen, announce = false, scam = scamOnPaymentScreen, reason = "system_window")
@@ -236,12 +415,16 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         }
         if (active != secureScreenPkg) secureScreenPkg = null
         noteForeground(active)
-        val allowed = service.allowedRoot()
+        val allowed = service?.allowedRoot()
         if (allowed == null) {
             applyPrivacy(secret = false, payment = false)
             return
         }
         val check = ScreenReader.checkPrivacy(allowed.first, allowed.second)
+        if (check.checkoutPayment) {
+            service?.proactiveCheckoutStepOut(active)
+            return
+        }
         // A lock screen is remembered by its class name, and some apps report the next screen with
         // a generic Android class name that never clears it. Ordinary named buttons and no secret
         // mean the lock screen has gone.
@@ -250,7 +433,22 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
             secureScreenPkg = null
         }
         val reason = check.secretReason ?: if (secureScreenPkg != null) "lock_screen_class" else null
-        applyPrivacy(reason != null, check.payment, scam = check.scam, reason = reason)
+        applyPrivacy(reason != null, check.payment || paymentClassPkg == active, scam = check.scam, reason = reason)
+    }
+
+    /**
+     * Every full read goes through here. ScreenReader runs the privacy checks first and reads
+     * ask-first apps as controls only. A payment screen known by its class name is treated like
+     * any other payment screen.
+     */
+    private fun readScreen(allowed: Pair<AccessibilityNodeInfo, String>): ScreenSnapshot {
+        val read = ScreenReader.read(allowed.first, allowed.second)
+        if (BuildConfig.LABEL_PROBE && read.controlsOnly != null) LabelProbe.record(context, allowed.first)
+        return if (!read.secret && !read.payment && paymentClassPkg == read.pkg) {
+            ScreenSnapshot(read.pkg, false, true, read.scam, emptyList(), false)
+        } else {
+            read
+        }
     }
 
     private fun onTick() {
@@ -261,9 +459,15 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
             if (!locked) showNextReminder()
         }
         if (locked) return
+        rearmMicIfStuck()
         checkGoalExpiry()
-        val active = service.activePackage() ?: return
-        if (active == service.packageName) return
+        access.expireIdle(now())?.let { pkg ->
+            accessEnded(pkg, "idle")
+            if (sessionActive) overlay.setMessage(Lines.ACCESS_ENDED.text)
+        }
+        val active = service?.activePackage() ?: return
+        if (active == context.packageName) return
+        if (pollAllowedApp(active)) return
         // Foreground changes in other apps produce no events, so only the name is watched here.
         if (active == Allowlist.SYSTEM_UI && !secretOnScreen) {
             scanNow()
@@ -272,23 +476,161 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         } else if (secretOnScreen || paymentOnScreen) {
             // Nothing is said while hidden, so this is how she comes back when the screen clears.
             scanNow()
+        } else if (Allowlist.isShoppingApp(active) && now() - lastScanAt >= SCAN_GAP_MS) {
+            // Shopping apps (Flipkart, Amazon, Swiggy) often render Payment Options inside a WebView
+            // without firing a new Activity state change. Poll scanNow() so we proactively step out.
+            scanNow()
         }
+    }
+
+    /**
+     * While an ask-first app is allowed and quiet, its screen is checked directly every
+     * POLL_MS, so neither hiding nor the next step depends on Android delivering its events.
+     */
+    private fun pollAllowedApp(active: String): Boolean {
+        val now = now()
+        val granted = access.grantedPackage(now) ?: return false
+        if (active != granted || now - lastAccessEventAt < EVENT_SILENCE_MS || now - lastPollAt < POLL_MS) return false
+        lastPollAt = now
+        if (!pollingLogged) {
+            pollingLogged = true
+            Log.i(TAG, "no events from $granted for ${EVENT_SILENCE_MS / 1000} s, checking its screen directly")
+        }
+        scanNow()
+        if (sessionActive && guiding) onScreenSettled()
+        return true
     }
 
     private fun noteForeground(pkg: String) {
         if (pkg == currentPkg) return
+        val previousPkg = currentPkg
+        // Leaving an ask-first app ends its access at once.
+        access.onForeground(pkg)?.let { accessEnded(it, "left_app") }
+        if (paymentClassPkg != pkg) paymentClassPkg = null
         currentPkg = pkg
         dismissedPkg = null
         if (sessionActive && guiding) {
             if (Allowlist.isAllowed(pkg)) {
+                // Keep cross-app handoffs (e.g. Play Store -> Flipkart) inside goalPkgs so the
+                // goal never expires across app launches, and auto-advance after 1000ms settle.
+                if (previousPkg == "com.android.vending" || Allowlist.isLauncher(previousPkg)) {
+                    goalPkgs += pkg
+                    lastOnGoalAppAt = now()
+                }
                 previousLabels = emptySet()
+                clickedSinceSettle = true
                 scheduleSettle()
-            } else {
+            } else if (access.needsAsking(pkg, now())) {
+                askConsent(null)
+            } else if (access.isDeclined(pkg)) {
+                // She said Nahi. Saathi keeps helping by conversation, without asking her to read it out.
+                stopPointing()
+            } else if (guide == null || !runGuide(null)) {
                 stopPointing()
                 say(Lines.CANNOT_SEE)
             }
+        } else if (sessionActive && Allowlist.isAllowed(pkg) && now() - subGoalCompletedAt < SUBGOAL_HANDOFF_MS) {
+            // App handoff right after completing a sub-goal (e.g. Play Store "Open" -> Flipkart):
+            // keep the floating avatar and panel alive in an active ready/listening state.
+            touchIdle()
+            overlay.setCompact(false)
+            overlay.setMessage("Boliye, main sun rahi hoon.")
         }
         refresh()
+    }
+
+    // Ask-first apps
+
+    /** Asks before reading an ask-first app. Nothing in it is read until she says Haan. */
+    private fun askConsent(words: String?) {
+        val pkg = currentPkg ?: return
+        if (!sessionActive || secretOnScreen || !access.ask(pkg)) return
+        consentWords = words
+        stopPointing()
+        Log.i(TAG, "access=asked pkg=$pkg")
+        overlay.showConsentButtons(true)
+        say(if (access.grantedBefore) Lines.CONSENT_AGAIN else Lines.CONSENT) { listenAgainOrClose() }
+        expectingAnswer = !secretOnScreen
+    }
+
+    override fun onEnableAccessibilityTapped() {
+        voice.speak(AccessibilitySetupGuide.spokenInstruction())
+    }
+
+    override fun onConsentAnswered(yes: Boolean) {
+        val pkg = currentPkg
+        if (!access.answer(pkg, yes, now()) || pkg == null) return
+        overlay.showConsentButtons(false)
+        followUpOpen = false
+        voice.stopListening()
+        touchIdle()
+        state.lastActivityAt = now()
+        val words = consentWords
+        consentWords = null
+        if (yes) {
+            val added = service?.setSessionPackages(setOf(pkg)) ?: false
+            lastAccessEventAt = now()
+            pollingLogged = false
+            Log.i(TAG, "access=granted pkg=$pkg events_added=$added")
+            overlay.setAccessNote(Lines.ACCESS_NOTE)
+            // The privacy check runs before anything is read for the step.
+            scanNow()
+            refresh()
+            if (!secretOnScreen) {
+                previousLabels = emptySet()
+                if (!runGuide(words)) sendTurn(words)
+            }
+        } else {
+            Log.i(TAG, "access=declined pkg=$pkg")
+            say(Lines.CONSENT_DECLINED) {
+                when {
+                    guide != null -> if (!runGuide(null)) listenAgainOrClose()
+                    words != null -> sendTurn(words)
+                    else -> listenAgainOrClose()
+                }
+            }
+        }
+    }
+
+    /** Her spoken answer to the question, worked out on the phone. Null if it was not an answer. */
+    private fun consentAnswer(text: String): Boolean? {
+        val tokens = text.lowercase().split(Regex("[\\s,.!?।]+")).filter(String::isNotEmpty)
+        if (tokens.isEmpty() || tokens.size > 4) return null
+        if (tokens.any { it in CONSENT_NO }) return false
+        if (tokens.any { it in CONSENT_YES }) return true
+        return null
+    }
+
+    /** Ends access for revoke() or reset(). pkg is null when nothing was granted or asked. */
+    private fun revokeAccess(reason: String) = accessEnded(access.revoke(), reason)
+
+    private fun accessEnded(pkg: String?, reason: String) {
+        overlay.showConsentButtons(false)
+        consentWords = null
+        if (pkg == null) return
+        val removed = service?.setSessionPackages(emptySet()) ?: false
+        // Fixed reason words and the package name only.
+        Log.i(TAG, "access=ended pkg=$pkg reason=$reason events_removed=$removed")
+        overlay.setAccessNote(null)
+        if (currentPkg == pkg) {
+            stopPointing()
+            lastSnapshot = null
+            previousLabels = emptySet()
+        }
+        refresh()
+    }
+
+    private fun screenMode(): String {
+        val pkg = currentPkg
+        return when {
+            Allowlist.isAskFirst(pkg) -> when {
+                access.mayRead(pkg, now()) -> SessionState.MODE_CONTROLS_ONLY
+                access.isDeclined(pkg) -> SessionState.MODE_NOT_SHARED
+                else -> SessionState.MODE_ASK_FIRST
+            }
+            pkg == null || Allowlist.isAllowed(pkg) -> SessionState.MODE_FULL
+            else -> SessionState.MODE_BLOCKED
+        }
     }
 
     /**
@@ -350,6 +692,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         gemini.cancel()
         awaitingReply = false
         followUpOpen = false
+        expectingAnswer = false
         voice.stopListening()
         voice.stopSpeaking()
         main.removeCallbacks(settle)
@@ -395,7 +738,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         overlay.setHeard(null)
         overlay.setMessage("Boliye, main sun rahi hoon.")
         overlay.showReminderButtons(shownReminder != null)
-        overlay.showEvalButton(prefs.evalLog)
+        overlay.showEvalButton(true)
         overlay.setKeepScreenOn(true)
         touchIdle()
         refresh()
@@ -406,6 +749,8 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         if (!sessionActive) return
         sessionActive = false
         followUpOpen = false
+        expectingAnswer = false
+        revokeAccess("session_ended")
         generation++
         gemini.cancel()
         awaitingReply = false
@@ -441,10 +786,17 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         expireGoal()
     }
 
+    /**
+     * A tap at any moment interrupts: speech stops, including the setup screen's, a request on
+     * its way is dropped, the guide stops moving on by itself, and the mic opens.
+     */
     override fun onListenTapped() {
         if (secretOnScreen) return
         touchIdle()
-        main.removeCallbacks(waitingLine)
+        VoiceIO.stopAllSpeaking()
+        cancelInFlight()
+        holdAutoAdvance()
+        expectingAnswer = false
         if (!voice.hasMicPermission) {
             say(Lines.NO_MIC)
             return
@@ -459,23 +811,22 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     }
 
     private fun openMic() {
+        expectingAnswer = false
         // A reply spoken while the mic is open would be heard as her words, so it is dropped.
         // She is about to say something new anyway.
-        if (awaitingReply) {
-            generation++
-            gemini.cancel()
-            awaitingReply = false
-        }
-        main.removeCallbacks(waitingLine)
+        cancelInFlight()
+        holdAutoAdvance()
         overlay.setCompact(false)
         overlay.setHeard(null)
-        overlay.setMessage("Ek second...")
-        overlay.setMood(Mood.THINKING)
+        // Shown at once, before the recognizer is ready, so she knows she can start talking.
+        overlay.setMessage(Lines.LISTENING_NOW.text)
+        overlay.setMood(Mood.LISTENING)
         voice.listen(this)
     }
 
     /** One more turn without a tap. Used after answers, never after a step she must do herself. */
     private fun listenAgainOrClose() {
+        expectingAnswer = false
         val canListen = sessionActive && !lastInputTyped && prefs.followUpListening &&
             !secretOnScreen && !locked && shownReminder == null && voice.hasMicPermission
         if (canListen) {
@@ -499,6 +850,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     override fun onTypingStarted() {
         typing = true
         followUpOpen = false
+        expectingAnswer = false
         touchIdle()
         voice.stopListening()
         voice.stopSpeaking()
@@ -520,7 +872,21 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
 
     override fun onWrongTapped() {
         touchIdle()
-        if (evalLog.markLast()) overlay.setHeard(Lines.NOTED.text)
+        evalLog.markLast()
+        reportCurrentOutput("overlay_button_galat_hai")
+        overlay.setHeard(Lines.NOTED.text)
+    }
+
+    private fun reportCurrentOutput(reason: String) {
+        val trace = lastTraceId ?: "local_tier1_${now()}"
+        gemini.reportFlaggedOutput(
+            traceId = trace,
+            lastUtterance = lastUtterance,
+            lastReply = lastLine?.text,
+            currentApp = Allowlist.label(currentPkg),
+            targetLabel = targetLabel,
+            reason = reason,
+        )
     }
 
     // Voice
@@ -531,10 +897,14 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     }
 
     override fun onPartial(text: String) {
+        lastHeardAt = SystemClock.uptimeMillis()
+        holdAutoAdvance()
         overlay.setHeard(PrivacyFilter.filterSpeech(text).text)
     }
 
     override fun onHeard(text: String) {
+        lastHeardAt = SystemClock.uptimeMillis()
+        holdAutoAdvance()
         followUpOpen = false
         lastInputTyped = false
         overlay.setMood(Mood.RESTING)
@@ -568,12 +938,14 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         say(Lines.PACK_MISSING)
     }
 
-    private fun say(line: Line, then: (() -> Unit)? = null) {
+    private fun say(line: Line, rate: Float = prefs.speechRate, then: (() -> Unit)? = null) {
         if (secretOnScreen) return
+        // A new line replaces the last one, and whatever it was waiting for.
+        expectingAnswer = false
         lastLine = line
         linesSaid++
         overlay.setMessage(line.text)
-        voice.speak(line.speech) {
+        voice.speak(line.speech, rate) {
             if (then != null) {
                 then()
             } else if (!guiding) {
@@ -594,12 +966,28 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         touchIdle()
         followUps = 0
         val filtered = PrivacyFilter.filterSpeech(raw)
+        lastUtterance = filtered.text
         overlay.setHeard(filtered.text)
+        // During a guide a spoken number is a phone number she should type. It was masked, and
+        // nothing is sent. A code or PIN still gets the warning below.
+        if (guide != null && filtered.masked && !PrivacyFilter.mentionsSecret(raw)) {
+            evalLog.writeLocal(filtered.text, "type_number")
+            say(Lines.TYPE_NUMBER)
+            return
+        }
         // Her words stop here if they look like a code being read out.
         if (filtered.warn) {
             evalLog.writeLocal(filtered.text, "otp_warning")
             say(Lines.OTP_WARNING)
             return
+        }
+        access.touch(now())
+        if (access.isAsked(currentPkg)) {
+            consentAnswer(filtered.text)?.let { yes ->
+                evalLog.writeLocal(filtered.text, if (yes) "consent_yes" else "consent_no")
+                onConsentAnswered(yes)
+                return
+            }
         }
         if (runLocalCommand(filtered.text)) return
         // A collect request on screen gets the warning whatever she asks about it.
@@ -609,7 +997,258 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
             return
         }
         state.lastActivityAt = now()
+        // "Ho gaya" during a guide is answered on the phone, unless the screen fits no step.
+        if (guide != null && Guides.isDone(filtered.text) && runGuide(filtered.text)) return
+        // A request that matches a prepared guide runs it on the phone.
+        Guides.match(filtered.text, inWhatsApp = whatsAppContext())?.let {
+            startGuide(it, filtered.text)
+            return
+        }
+        // Tier 1 Edge-to-Cloud Triage: local on-device DOM matching for simple UI lookups/taps.
+        if (tryLocalDomMatch(filtered.text)) return
+        // Tier 1 On-Device Deterministic Parser for basic list/reminder/alarm commands (<50ms).
+        if (runDeterministicLocalAction(filtered.text)) return
         sendTurn(filtered.text)
+    }
+
+    /**
+     * Runs [LocalCommandParser] on-device before calling Cloud Run. Executes unambiguous
+     * list_read, list_clear, reminder_set, and alarm_set commands with <50ms latency.
+     */
+    private fun runDeterministicLocalAction(utterance: String): Boolean {
+        val action = LocalCommandParser.parse(utterance, hasPendingQuestion = state.pendingQuestion != null)
+            ?: return false
+        lastTraceId = "local_tier1_${now()}"
+        Log.i(TAG, "tier=tier1_local intent=${action.intent} trace=$lastTraceId")
+        evalLog.writeLocal(utterance, "tier1_local:${action.intent}")
+        when (action) {
+            is LocalAction.ListRead -> {
+                val open = lists.open(action.list)
+                val line = if (open.isEmpty()) Lines.listEmpty() else Lines.listRead(open)
+                sayThenListen(line)
+                remember(utterance, line)
+            }
+            is LocalAction.ListClear -> {
+                lists.clear(action.list)
+                saved(LastAction("list_clear", list = action.list))
+                val line = Lines.listCleared()
+                sayThenListen(line)
+                remember(utterance, line)
+            }
+            is LocalAction.ReminderSet -> {
+                if (action.repeat == "daily") {
+                    val parsed = AiReply.parseDailyTime(action.time) ?: return false
+                    reminders.addDaily(action.text, action.textHi, parsed.first, parsed.second)
+                } else {
+                    val parsed = AiReply.parseDailyTime(action.time) ?: return false
+                    val at = AiReply.nextTime(parsed.first, parsed.second)
+                    reminders.addOnce(action.text, action.textHi, at)
+                }
+                saved(LastAction("reminder_set", text = action.text, time = action.time, repeat = action.repeat))
+                sayThenListen(action.line)
+                remember(utterance, action.line)
+            }
+            is LocalAction.AlarmSet -> {
+                startGoal(
+                    Goal(
+                        text = "Teach her to set an alarm for ${action.time} in the phone's Clock app",
+                        kind = "alarm_teach",
+                        app = "Clock",
+                    )
+                )
+                say(action.line) {
+                    if (sessionActive && canReadNow()) sendTurn(null) else scheduleAutoClose()
+                }
+                remember(utterance, action.line)
+            }
+        }
+        return true
+    }
+
+    /**
+     * Tier 1 (On-Device Edge Matching): Intercepts simple UI requests containing keywords like
+     * "where is", "find", or "click". When the extracted target keyword exactly matches a tappable
+     * element's text or contentDescription in the current DOM tree, points at its coordinates
+     * immediately without making a network call.
+     */
+    private fun tryLocalDomMatch(utterance: String): Boolean {
+        if (!canReadNow() || !LOCAL_UI_INTENT.containsMatchIn(utterance)) return false
+        val targetKeyword = utterance
+            .lowercase()
+            .replace(Regex("[^\\p{L}\\p{Nd}\\s]"), " ")
+            .split(Regex("\\s+"))
+            .filter { it.isNotEmpty() && it !in LOCAL_UI_STOPWORDS }
+            .joinToString(" ")
+            .trim()
+        if (targetKeyword.isEmpty()) return false
+
+        val snapshot = lastSnapshot?.takeIf { it.pkg == currentPkg && !it.secret && !it.payment }
+            ?: service?.allowedRoot()?.let(::readScreen)?.takeIf { !it.secret && !it.payment }
+            ?: return false
+
+        val matched = snapshot.elements.firstOrNull { element ->
+            element.tappable &&
+                element.label != ControlsOnly.HIDDEN &&
+                element.label != "(no label)" &&
+                element.label.equals(targetKeyword, ignoreCase = true)
+        } ?: return false
+
+        lastTraceId = "local_tier1_${now()}"
+        evalLog.writeLocal(utterance, "tier1_dom_match:${matched.label}")
+        if (!guiding) {
+            startGoal(
+                Goal(
+                    text = "Tap ${matched.label}",
+                    kind = "guide",
+                    app = Allowlist.label(currentPkg),
+                )
+            )
+        } else {
+            state.goal?.let { state.goal = it.copy(step = it.step + 1) }
+        }
+        previousLabels = snapshot.labels
+        lastSnapshot = snapshot
+        currentPkg?.let { goalPkgs += it }
+        lastOnGoalAppAt = now()
+        targetLabel = matched.label
+        targetGesture = "tap"
+        state.lastStep = LastStep(targetLabel = matched.label, expectedNext = "next screen")
+
+        overlay.pointAt(matched.bounds, "tap", phone.navigationMode() == "gestures")
+        val line = Lines.tapHere(matched.row)
+        say(line, rate = VoiceIO.GUIDE_SPEECH_RATE) {
+            main.removeCallbacks(waitingLine)
+            main.postDelayed(waitingLine, WAITING_MS)
+        }
+        remember(utterance, line)
+        return true
+    }
+
+    // Prepared guides
+
+    private fun whatsAppContext(): Boolean =
+        Allowlist.isAskFirst(currentPkg) || state.goal?.guide != null ||
+            state.goal?.app?.contains("WhatsApp", ignoreCase = true) == true
+
+    private fun startGuide(found: Guide, words: String?) {
+        startGoal(Goal(text = found.goal, kind = "guide", app = Allowlist.label(found.app), guide = found.id))
+        if (!isAccessibilityEnabled()) {
+            promptEnableAccessibilityForScreenGuidance(words)
+            return
+        }
+        guide = GuideRunner(found)
+        evalLog.writeLocal(words, "guide_start:${found.id}")
+        // On a screen that fits no step, such as WhatsApp's settings, Gemini gives the first step.
+        if (!runGuide(words)) sendTurn(words)
+    }
+
+    /**
+     * Runs the guide on the current screen. Returns true when the phone answered, and false when
+     * the screen fits no expected step, so the caller asks Gemini instead.
+     */
+    private fun runGuide(words: String?): Boolean {
+        val runner = guide ?: return false
+        if (!sessionActive || secretOnScreen) return true
+        val pkg = currentPkg
+        if (Allowlist.isAskFirst(pkg)) {
+            if (access.needsAsking(pkg, now())) {
+                askConsent(words)
+                return true
+            }
+            if (access.isDeclined(pkg)) {
+                // Conversation only: she says "ho gaya" after each step.
+                if (runner.index >= 0 && words != null && !Guides.isDone(words)) return false
+                return handleGuide(runner.advance(inApp = true), words)
+            }
+        }
+        val snapshot = if (canReadNow()) service?.allowedRoot()?.let(::readScreen) else null
+        if (snapshot?.checkoutPayment == true) {
+            service?.proactiveCheckoutStepOut(snapshot.pkg)
+            return true
+        }
+        if (snapshot != null && (snapshot.secret || snapshot.payment)) {
+            applyPrivacy(snapshot.secret, snapshot.payment, scam = snapshot.scam)
+            return true
+        }
+        if (snapshot != null) {
+            previousLabels = snapshot.labels
+            lastSnapshot = snapshot
+        }
+        return handleGuide(runner.onScreen(guideScreen(pkg, snapshot)), words)
+    }
+
+    private fun guideScreen(pkg: String?, snapshot: ScreenSnapshot?): GuideScreen {
+        val controls = snapshot?.controlsOnly?.controls ?: snapshot?.elements?.map {
+            Control(it.number, it.label, it.type, it.tappable, Box(it.bounds.left, it.bounds.top, it.bounds.right, it.bounds.bottom))
+        }
+        return GuideScreen(pkg, controls.orEmpty())
+    }
+
+    /** Acts on the guide's decision. False means it handed over to Gemini. */
+    private fun handleGuide(decision: GuideRunner.Decision, words: String?): Boolean {
+        val runner = guide ?: return false
+        val rule = "guide:${runner.guide.id}"
+        when (decision) {
+            is GuideRunner.Decision.Show -> {
+                lastTraceId = "local_tier1_${now()}"
+                evalLog.writeLocal(words, "$rule:step${decision.index}")
+                showGuideStep(decision.step, decision.control, words)
+            }
+            is GuideRunner.Decision.Stay -> {
+                decision.control?.let { pointAtControl(it) }
+                // She spoke, but nothing has changed: say the same step again.
+                if (words != null) {
+                    evalLog.writeLocal(words, "$rule:repeat")
+                    runner.step?.let { say(it.line(decision.control?.let(::placeOf))) }
+                }
+            }
+            is GuideRunner.Decision.Missing -> {
+                evalLog.writeLocal(words, "$rule:missing${decision.index}")
+                stopPointing()
+                expireGoal()
+                sayThenListen(decision.line)
+                remember(words, decision.line)
+            }
+            GuideRunner.Decision.Done -> {
+                evalLog.writeLocal(words, "$rule:done")
+                prefs.recordLearned(runner.guide.goal)
+                stopPointing()
+                expireGoal()
+                overlay.setMood(Mood.HAPPY)
+                sayThenListen(runner.guide.doneLine)
+                remember(words, runner.guide.doneLine)
+            }
+            GuideRunner.Decision.Fallback -> return false
+        }
+        return true
+    }
+
+    private fun showGuideStep(step: com.saathi.app.core.GuideStep, control: Control?, words: String?) {
+        followUps = 0
+        clickedSinceSettle = false
+        state.goal?.let { state.goal = it.copy(step = it.step + 1) }
+        state.lastStep = LastStep(targetLabel = step.target, expectedNext = step.next.id)
+        currentPkg?.let { goalPkgs += it }
+        lastOnGoalAppAt = now()
+        targetLabel = control?.label
+        targetGesture = "tap"
+        if (control != null) pointAtControl(control) else overlay.clearPointer()
+        val line = step.line(control?.let(::placeOf))
+        say(line, rate = VoiceIO.GUIDE_SPEECH_RATE) {
+            main.removeCallbacks(waitingLine)
+            main.postDelayed(waitingLine, WAITING_MS)
+        }
+        remember(words, line)
+    }
+
+    private fun pointAtControl(control: Control) {
+        val box = control.box
+        overlay.pointAt(Rect(box.left, box.top, box.right, box.bottom), "tap", phone.navigationMode() == "gestures")
+    }
+
+    private fun placeOf(control: Control): Pair<String, String> {
+        val size = overlay.screenSize()
+        return ControlsOnly.spokenPlace(control.box, size.x, size.y)
     }
 
     private fun runLocalCommand(text: String): Boolean {
@@ -621,8 +1260,9 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
             words <= 4 && FASTER.containsMatchIn(clean) -> "faster"
             words <= 3 && STOP.matches(clean) -> "stop"
             WRONG.containsMatchIn(clean) -> {
-                // Marks the turn before this one, so it is logged after marking.
+                // Marks the turn before this one and reports it to the backend audit log.
                 evalLog.markLast()
+                reportCurrentOutput("voice_galat_tha")
                 if (!guiding) return false
                 "wrong"
             }
@@ -656,15 +1296,30 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
      * list goes only with a guided goal on a readable screen, and never from a payment screen.
      * invalidReason is set on the single retry after a reply that broke the contract.
      */
-    private fun sendTurn(words: String?, note: String? = null, invalidReason: String? = null) {
+    private fun sendTurn(
+        words: String?,
+        note: String? = null,
+        invalidReason: String? = null,
+        retried: Boolean = invalidReason != null,
+        forceScreenshot: Boolean = false,
+    ) {
         if (!sessionActive) return
         val now = now()
         expireIfStale(now)
+        // A guided goal in an ask-first app waits for her answer before anything is read.
+        if (guiding && !secretOnScreen && access.needsAsking(currentPkg, now)) {
+            askConsent(words)
+            return
+        }
         var snapshot: ScreenSnapshot? = null
         if (guiding && canReadNow()) {
-            val allowed = service.allowedRoot()
+            val allowed = service?.allowedRoot()
             if (allowed != null) {
-                val read = ScreenReader.read(allowed.first, allowed.second)
+                val read = readScreen(allowed)
+                if (read.checkoutPayment) {
+                    service?.proactiveCheckoutStepOut(read.pkg)
+                    return
+                }
                 applyPrivacy(read.secret || secureScreenPkg != null, read.payment, scam = read.scam)
                 if (read.secret || secureScreenPkg != null) return
                 if (read.scam && !read.payment && scamWarnedFor != read.labels) {
@@ -673,6 +1328,17 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
                     warnScam()
                     return
                 }
+                // Loading guard: if the Accessibility tree has an active ProgressBar or fewer than
+                // 3 meaningful text nodes (skeleton state), defer once by 500ms before instructing.
+                if (read.isLoadingOrSkeleton && !deferredForLoading && !retried && invalidReason == null) {
+                    deferredForLoading = true
+                    Log.i(TAG, "Deferring guide_step by ${LOADING_DEFER_MS}ms while ${read.pkg} finishes loading")
+                    main.postDelayed({
+                        if (sessionActive) sendTurn(words, note, invalidReason, retried, forceScreenshot)
+                    }, LOADING_DEFER_MS)
+                    return
+                }
+                deferredForLoading = false
                 // A payment screen is never sent. She still gets an answer by conversation.
                 if (!read.payment) snapshot = read
             }
@@ -680,9 +1346,12 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         // An automatic step needs a screen to look at.
         if (snapshot == null && words == null) return
 
-        if (invalidReason == null) {
+        val reprompt = guiding && words != null && USER_REPROMPT_REGEX.containsMatchIn(words)
+        val attachScreenshotForEscalation = forceScreenshot || reprompt
+
+        if (invalidReason == null && !retried) {
             val changed = if (snapshot != null) {
-                overlap(previousLabels, snapshot.labels) < SAME_SCREEN
+                currentPkg != pkgAtLastTurn || overlap(previousLabels, snapshot.labels) < SAME_SCREEN
             } else {
                 currentPkg != pkgAtLastTurn
             }
@@ -699,10 +1368,11 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
                 title = snapshot?.title,
                 changed = changed,
                 readable = canReadNow(),
+                mode = screenMode(),
             )
             state.turn++
         } else {
-            state.screen = state.screen?.copy(title = snapshot?.title, readable = canReadNow())
+            state.screen = state.screen?.copy(title = snapshot?.title, readable = canReadNow(), mode = screenMode())
         }
         pkgAtLastTurn = currentPkg
         if (snapshot != null) previousLabels = snapshot.labels
@@ -712,20 +1382,51 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         val sent = snapshot
 
         val gen = beginRequest()
-        val wantsImage = sent != null && sent.needsScreenshot && !Allowlist.isLauncher(sent.pkg) &&
-            screenshotRefusedFor != sent.labels && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
-        val send = { image: String? ->
-            if (gen == generation) {
-                val prompt = buildPrompt(words, note, invalidReason, sent, stateBefore)
-                gemini.ask(prompt, image) { result ->
-                    if (gen != generation) return@ask
-                    finishRequest()
-                    handleResult(result, words, note, sent, stateBefore, retried = invalidReason != null)
+        val timeoutRunnable = Runnable {
+            if (gen == generation && awaitingReply) {
+                Log.w(TAG, "LLM call timed out after ${LLM_TIMEOUT_MS}ms (retried=$retried)")
+                generation++
+                gemini.cancel()
+                finishRequest()
+                if (!retried) {
+                    sendTurn(words, note, invalidReason, retried = true, forceScreenshot = attachScreenshotForEscalation)
+                } else {
+                    say(Lines.RETRY_FAILED)
                 }
             }
         }
-        if (wantsImage) {
-            service.capture { image, blocked ->
+        activeTimeoutRunnable?.let(main::removeCallbacks)
+        activeTimeoutRunnable = timeoutRunnable
+        main.postDelayed(timeoutRunnable, LLM_TIMEOUT_MS)
+
+        // Smart Screenshot Policy:
+        // - Routine turns in DOM_ONLY_PACKAGES (Settings, Play Store, WhatsApp, Contacts, Dialer,
+        //   Launcher) skip takeScreenshot().
+        // - All other allowed apps (Flipkart, Swiggy, Myntra, media, unfamiliar apps) OR user
+        //   reprompts / low-confidence escalations attach a 540px JPEG-60 screenshot.
+        // - Never for ask-first apps (WhatsApp): a picture would show names/messages the list hides.
+        val wantsImage = sent != null &&
+            (sent.needsScreenshot || attachScreenshotForEscalation) &&
+            !Allowlist.isLauncher(sent.pkg) &&
+            sent.controlsOnly == null &&
+            Allowlist.tier(sent.pkg) == Allowlist.Tier.ALLOWED &&
+            screenshotRefusedFor != sent.labels &&
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+        val send = { image: String? ->
+            if (gen == generation) {
+                lastSentWithScreenshot = image != null
+                val prompt = buildPrompt(words, note, invalidReason, sent, stateBefore)
+                gemini.ask(prompt, image) { result ->
+                    if (gen != generation) return@ask
+                    main.removeCallbacks(timeoutRunnable)
+                    finishRequest()
+                    handleResult(result, words, note, sent, stateBefore, retried = retried)
+                }
+            }
+        }
+        val activeService = service
+        if (wantsImage && activeService != null) {
+            activeService.capture { image, blocked ->
                 if (gen != generation) return@capture
                 // A blocked screenshot means text structure only. Payment screens never get this
                 // far, because they are recognised from their text before any capture.
@@ -739,17 +1440,22 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
 
     private fun beginRequest(): Int {
         generation++
+        activeTimeoutRunnable?.let(main::removeCallbacks)
+        activeTimeoutRunnable = null
         gemini.cancel()
         awaitingReply = true
         lastCallAt = now()
         main.removeCallbacks(waitingLine)
         main.removeCallbacks(autoClose)
         overlay.clearPointer()
+        overlay.setMessage("Dekh rahi hoon...")
         overlay.setMood(Mood.THINKING)
         return generation
     }
 
     private fun finishRequest() {
+        activeTimeoutRunnable?.let(main::removeCallbacks)
+        activeTimeoutRunnable = null
         awaitingReply = false
         overlay.setMood(Mood.RESTING)
     }
@@ -764,6 +1470,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     ): String = buildString {
         appendLine("CONTEXT")
         appendLine("Current time: " + SimpleDateFormat("EEEE yyyy-MM-dd HH:mm", Locale.ENGLISH).format(Date()))
+        currentPkg?.takeIf { it.isNotBlank() }?.let { appendLine("Active package: $it") }
         if (prefs.herName.isNotBlank()) appendLine("Her name: ${prefs.herName}")
         if (prefs.sonName.isNotBlank()) appendLine("Her son's name: ${prefs.sonName}")
         val learned = prefs.learnedTasks().entries.sortedByDescending { it.value }.take(8)
@@ -793,6 +1500,10 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         } else {
             appendLine("HER WORDS: none. The screen has changed. Give the next single step, or goal_done if the goal is finished.")
         }
+        guide?.let { runner ->
+            val last = runner.step?.let { " Its last step was \"${it.line(null).text}\", expecting the screen \"${it.next.id}\"." }.orEmpty()
+            appendLine("GUIDE: the app is running the prepared guide \"${runner.guide.id}\".$last If the screen does not fit that, help her with one step to get there. Leave guide as \"none\".")
+        }
         if (note != null) appendLine("NOTE: $note")
         if (invalidReason != null) appendLine("Your last reply was invalid: $invalidReason. Reply again, following the schema.")
     }
@@ -811,21 +1522,25 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
             is GeminiClient.Result.Failed -> {
                 val validation = listOfNotNull(result.failure.name, result.detail).joinToString(": ")
                 evalLog.write(words, stateBefore, null, validation, result.latencyMs, result.model)
-                if (result.failure == GeminiClient.Failure.BAD_REPLY && !retried) {
-                    sendTurn(words, note, invalidReason = result.detail ?: "it did not follow the schema")
+                if (!retried && result.failure != GeminiClient.Failure.BAD_KEY && result.failure != GeminiClient.Failure.NO_CREDIT) {
+                    val reason = if (result.failure == GeminiClient.Failure.BAD_REPLY) {
+                        result.detail ?: "it did not follow the schema"
+                    } else {
+                        null
+                    }
+                    sendTurn(words, note, invalidReason = reason, retried = true)
                     return
                 }
                 say(
                     when (result.failure) {
-                        GeminiClient.Failure.NO_KEY, GeminiClient.Failure.BAD_KEY -> Lines.NO_KEY
+                        GeminiClient.Failure.BAD_KEY -> Lines.NO_KEY
                         GeminiClient.Failure.NO_CREDIT -> Lines.NO_CREDIT
-                        GeminiClient.Failure.NETWORK -> Lines.NO_INTERNET
-                        GeminiClient.Failure.BAD_REPLY -> Lines.RETRY_FAILED
-                        else -> Lines.AI_ERROR
+                        else -> Lines.RETRY_FAILED
                     }
                 )
             }
             is GeminiClient.Result.Ok -> {
+                lastTraceId = result.traceId ?: "cloud_${now()}"
                 val problem = problemWith(result.reply, snapshot)
                 evalLog.write(
                     words, stateBefore, result.reply.raw, problem ?: "ok", result.latencyMs, result.model,
@@ -849,6 +1564,9 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         val target = reply.targetElement ?: return null
         val element = snapshot.elements.firstOrNull { it.number == target }
             ?: return "target_element $target is not in the SCREEN list"
+        if (snapshot.controlsOnly != null && element.label == ControlsOnly.HIDDEN) {
+            return "target_element $target is [hidden]. Never point at hidden content: set target_element null and say in words where to tap"
+        }
         if (!element.tappable) return "target_element $target is text-only, not tappable"
         return null
     }
@@ -866,7 +1584,17 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
                 return
             }
             startGoal(Goal(text = "Teach her to set this alarm herself in the phone's Clock app", kind = "alarm_teach"))
+            if (!isAccessibilityEnabled()) {
+                promptEnableAccessibilityForScreenGuidance(words)
+                return
+            }
             sendTurn(words)
+            return
+        }
+
+        // The model recognised a prepared guide. The phone runs it from here.
+        Guides.byId(reply.guide)?.takeIf { it.id != guide?.guide?.id }?.let {
+            startGuide(it, words)
             return
         }
 
@@ -882,6 +1610,9 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
 
         val outcome = state.applyPatch(reply.statePatch)
         if (outcome.goalStarted) {
+            // A new goal never inherits access she gave for the last one, or its guide.
+            accessEnded(access.reset(), "new_goal")
+            guide = null
             goalPkgs.clear()
             lastOnGoalAppAt = now()
             targetLabel = null
@@ -894,22 +1625,52 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
                     val kind = if (reply.intent == "alarm_teach") "alarm_teach" else "guide"
                     startGoal(Goal(text = state.goal?.text?.ifBlank { null } ?: question.ifBlank { "Help on the phone" }, kind = kind))
                 }
+                if (!isAccessibilityEnabled()) {
+                    promptEnableAccessibilityForScreenGuidance(words)
+                    return
+                }
+                overlay.showEnableAccessibilityCard(false)
                 if (snapshot == null) {
+                    // An ask-first app: she is asked before the screen goes with the next request.
+                    if (!secretOnScreen && access.needsAsking(currentPkg, now())) {
+                        askConsent(words)
+                        return
+                    }
                     // The goal is known now, so the screen goes with the next request.
-                    if (canReadNow() && ++followUps <= MAX_FOLLOW_UPS) {
+                    if (canReadNow() && service?.allowedRoot() != null && ++followUps <= MAX_FOLLOW_UPS) {
                         sendTurn(words)
                         return
                     }
                     stopPointing()
-                    say(reply.line.takeIf { it.text.isNotBlank() } ?: Lines.CANNOT_SEE)
+                    // After Nahi in WhatsApp she is never asked to read the screen out instead.
+                    val fallback = if (access.isDeclined(currentPkg)) Lines.AI_ERROR else Lines.CANNOT_SEE
+                    say(reply.line.takeIf { it.text.isNotBlank() } ?: fallback)
                 } else {
+                    // Auto-escalate to Hydrogen + compressed screenshot when a DOM-only guide_step
+                    // returned low confidence (< 0.75) or no clear target on a full readable screen.
+                    val needsVisionEscalation = !lastSentWithScreenshot &&
+                        snapshot.controlsOnly == null &&
+                        !Allowlist.isLauncher(snapshot.pkg) &&
+                        Allowlist.tier(snapshot.pkg) == Allowlist.Tier.ALLOWED &&
+                        ++followUps <= MAX_FOLLOW_UPS &&
+                        (reply.confidence < GUIDE_ESCALATION_CONFIDENCE ||
+                            (reply.targetElement == null && (reply.gesture == "tap" || reply.gesture == "none")))
+                    if (needsVisionEscalation) {
+                        Log.i(TAG, "DOM-only guide_step returned confidence=${reply.confidence} target=${reply.targetElement}; escalating with screenshot")
+                        sendTurn(words, forceScreenshot = true)
+                        return
+                    }
                     showStep(reply, snapshot, outcome.setsTargetLabel)
                 }
             }
             "goal_done" -> {
                 state.goal?.takeIf { it.kind in SessionState.GUIDED_KINDS }?.let { prefs.recordLearned(it.text) }
+                subGoalCompletedAt = now()
                 expireGoal()
                 stopPointing()
+                // Completing a sub-goal (e.g. "Install" / "Open" in Play Store) transitions the
+                // overlay to an active listening/ready state instead of destroying the overlay.
+                overlay.setCompact(false)
                 overlay.setMood(Mood.HAPPY)
                 sayThenListen(reply.line.takeIf { it.text.isNotBlank() } ?: Lines.DONE)
             }
@@ -943,7 +1704,11 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         targetLabel = null
         clickedSinceSettle = false
         // The screen may have moved during the request, so read it again before saying anything.
-        val fresh = service.allowedRoot()?.let { ScreenReader.read(it.first, it.second) }
+        val fresh = service?.allowedRoot()?.let(::readScreen)
+        if (fresh?.checkoutPayment == true) {
+            service?.proactiveCheckoutStepOut(fresh.pkg)
+            return
+        }
         if (fresh != null && (fresh.secret || fresh.payment)) {
             applyPrivacy(fresh.secret, fresh.payment, scam = fresh.scam)
             return
@@ -982,10 +1747,44 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
 
         targetGesture = reply.gesture
         overlay.pointAt(bounds, reply.gesture, phone.navigationMode() == "gestures")
-        say(reply.line) {
+        say(reply.line, rate = VoiceIO.GUIDE_SPEECH_RATE) {
             main.removeCallbacks(waitingLine)
             main.postDelayed(waitingLine, WAITING_MS)
         }
+    }
+
+    /** The mic must not stay closed while Saathi waits for her answer and nothing else is running. */
+    private fun rearmMicIfStuck() {
+        val now = ListenPolicy.Now(
+            expectingAnswer = expectingAnswer,
+            sessionActive = sessionActive,
+            speaking = voice.isSpeaking,
+            awaitingReply = awaitingReply,
+            listening = voice.isListening,
+            typing = typing,
+            hidden = secretOnScreen,
+            msSinceSpeechEnded = SystemClock.uptimeMillis() - voice.speechEndedAt,
+        )
+        if (!ListenPolicy.mustRearm(now)) return
+        Log.w(TAG, "mic was closed while waiting for her answer; reopening")
+        listenAgainOrClose()
+    }
+
+    /** Stops a request on its way, so a late answer cannot talk over what she says next. */
+    private fun cancelInFlight() {
+        if (!awaitingReply) return
+        generation++
+        activeTimeoutRunnable?.let(main::removeCallbacks)
+        activeTimeoutRunnable = null
+        gemini.cancel()
+        awaitingReply = false
+    }
+
+    /** Her words come first: the guide does not move on by itself while she speaks. */
+    private fun holdAutoAdvance() {
+        main.removeCallbacks(settle)
+        main.removeCallbacks(waitingLine)
+        deferredForLoading = false
     }
 
     private fun stopPointing() {
@@ -1002,6 +1801,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     /** Says the line, then listens once more for a follow-up, or closes the panel. */
     private fun sayThenListen(line: Line) {
         say(line) { listenAgainOrClose() }
+        expectingAnswer = !secretOnScreen
     }
 
     private fun warnScam() {
@@ -1012,6 +1812,8 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     // Goal, history and expiry
 
     private fun startGoal(goal: Goal) {
+        accessEnded(access.reset(), "new_goal")
+        guide = null
         state.goal = goal.copy(status = SessionState.ACTIVE, step = 0)
         state.lastStep = LastStep()
         goalPkgs.clear()
@@ -1020,6 +1822,9 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     }
 
     private fun expireGoal() {
+        // Access to an ask-first app lasts no longer than the goal, and a Nahi is forgotten with it.
+        accessEnded(access.reset(), "goal_ended")
+        guide = null
         state.goal = null
         state.lastStep = LastStep()
         state.pendingQuestion = null
@@ -1058,30 +1863,82 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     // The screen changed
 
     private fun scheduleSettle() {
+        deferredForLoading = false
         main.removeCallbacks(settle)
         main.postDelayed(settle, SETTLE_MS)
     }
 
     private fun onScreenSettled() {
         // A reply already on its way re-checks the screen when it arrives, and she may be speaking.
-        if (!sessionActive || !guiding || secretOnScreen || paymentOnScreen || awaitingReply || voice.isListening) return
-        val allowed = service.allowedRoot() ?: return
-        val snapshot = ScreenReader.read(allowed.first, allowed.second)
+        if (!sessionActive || !guiding || secretOnScreen || paymentOnScreen || awaitingReply) return
+        // She is talking, or Saathi is still answering her: her words first, the step after.
+        if (ListenPolicy.holdAutoAdvance(voice.isListening, voice.isSpeaking, SystemClock.uptimeMillis() - lastHeardAt)) {
+            if (!voice.isListening) scheduleSettle()
+            return
+        }
+        val allowed = service?.allowedRoot() ?: return
+        val snapshot = readScreen(allowed)
+        if (snapshot.checkoutPayment) {
+            service?.proactiveCheckoutStepOut(snapshot.pkg)
+            return
+        }
         if (snapshot.secret || snapshot.payment) {
             applyPrivacy(snapshot.secret, snapshot.payment, scam = snapshot.scam)
             return
         }
+        // Loading guard: if the current Accessibility tree contains an active ProgressBar or has
+        // fewer than 3 meaningful text nodes (skeleton/loading state), defer once by 500ms so we
+        // don't instruct on a half-loaded screen.
+        if (snapshot.isLoadingOrSkeleton && !deferredForLoading) {
+            deferredForLoading = true
+            Log.i(TAG, "Screen in ${snapshot.pkg} is still loading (progressBar=${snapshot.hasProgressBar}, textNodes=${snapshot.meaningfulTextCount}); deferring ${LOADING_DEFER_MS}ms")
+            main.removeCallbacks(settle)
+            main.postDelayed(settle, LOADING_DEFER_MS)
+            return
+        }
+        deferredForLoading = false
         val clicked = clickedSinceSettle
-        clickedSinceSettle = false
+
+        // A running guide answers on the phone whenever the screen fits its step.
+        guide?.let { runner ->
+            val decision = runner.onScreen(guideScreen(snapshot.pkg, snapshot))
+            if (decision != GuideRunner.Decision.Fallback) {
+                clickedSinceSettle = false
+                previousLabels = snapshot.labels
+                lastSnapshot = snapshot
+                handleGuide(decision, null)
+                return
+            }
+        }
 
         val overlap = overlap(previousLabels, snapshot.labels)
         val label = targetLabel
         val targetStillThere = label != null && snapshot.find(label) != null
+        val appChanged = pkgAtLastTurn != null && snapshot.pkg != pkgAtLastTurn
 
-        // A tap she made counts as progress unless the screen stayed the same.
-        val sameScreen = if (clicked) overlap >= NEARLY_IDENTICAL else overlap >= SAME_SCREEN
-        if (sameScreen && (targetStillThere || label == null)) {
+        // A tap she made or a foreground app change counts as progress unless the screen stayed the same.
+        val sameScreen = !appChanged && (if (clicked) overlap >= NEARLY_IDENTICAL else overlap >= SAME_SCREEN)
+        // After a "scroll down" step, any new rows coming into view deserve a fresh look, because
+        // what she is looking for may now be on screen.
+        val scrolledForStep = label == null && targetGesture.startsWith("swipe_") && overlap < NEARLY_IDENTICAL
+        if (sameScreen && !scrolledForStep && (targetStillThere || label == null)) {
+            if (clicked && label != null) {
+                // She tapped while a step was showing, but the screen did not advance (e.g. a
+                // header or non-navigating row was pointed at). Ask Gemini to pick the real button.
+                val wait = (MIN_CALL_GAP_MS - (now() - lastCallAt)).coerceAtLeast(0)
+                if (wait == 0L) {
+                    clickedSinceSettle = false
+                    state.lastActivityAt = now()
+                    overlay.clearPointer()
+                    sendTurn(
+                        null,
+                        note = "She tapped on the screen, but the screen did not change. Do not point at \"$label\" again if it is just a header or title; point at the actual action button (such as Select address, Change, Proceed, or Place order).",
+                    )
+                    return
+                }
+            }
             // A scroll, video or animation on the same screen: keep pointing and spend no AI call.
+            // Keep clickedSinceSettle intact so a delayed network render still triggers the next step.
             if (label != null) {
                 snapshot.find(label)?.let {
                     overlay.pointAt(it.bounds, targetGesture, phone.navigationMode() == "gestures")
@@ -1095,6 +1952,7 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
             main.postDelayed(settle, wait)
             return
         }
+        clickedSinceSettle = false
         state.lastActivityAt = now()
         overlay.clearPointer()
         sendTurn(null)
@@ -1319,7 +2177,10 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
     private companion object {
         const val TICK_MS = 500L
         const val SCAN_GAP_MS = 800L
-        const val SETTLE_MS = 650L
+        const val SETTLE_MS = 750L
+        const val LOADING_DEFER_MS = 500L
+        const val LLM_TIMEOUT_MS = 6000L
+        const val SUBGOAL_HANDOFF_MS = 90_000L
         const val MIN_CALL_GAP_MS = 1500L
         const val WAITING_MS = 30_000L
         const val IDLE_END_MS = 5 * 60_000L
@@ -1330,10 +2191,20 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         const val MAX_HISTORY = 4
         const val MAX_FOLLOW_UPS = 2
         const val MIN_CONFIDENCE = 0.6
+        const val GUIDE_ESCALATION_CONFIDENCE = 0.75
         const val SAME_SCREEN = 0.6
         const val NEARLY_IDENTICAL = 0.92
         const val UNHIDE_AFTER_MS = 1000L
         const val ORDINARY_SCREEN_BUTTONS = 3
+        const val EVENT_SILENCE_MS = 2000L
+        const val POLL_MS = 1500L
+
+        // Her spoken answer to the WhatsApp question, word by word.
+        val CONSENT_YES = setOf(
+            "haan", "han", "haa", "ha", "haanji", "hanji", "ji", "yes", "ok", "okay", "theek", "thik", "dekho", "dekhlo",
+            "हाँ", "हां", "हा", "हांजी", "जी", "ठीक", "देखो", "ओके",
+        )
+        val CONSENT_NO = setOf("nahi", "nahin", "nai", "na", "naa", "mat", "no", "नहीं", "नही", "ना", "मत")
 
         val REPEAT = Regex("phir se|fir se|dobara|repeat|फिर से|दोबारा")
         val SLOWER = Regex("dheere|dheme|slow|धीरे")
@@ -1344,5 +2215,21 @@ class Assistant(private val service: SaathiAccessibilityService) : OverlayContro
         val ALARM = Regex("(?i)alarm|अलार्म")
         val REMINDER_WORDS = Regex("(?i)yaad|remind|याद|रिमाइंडर")
         val WRONG = Regex("galat lag|ye galat|yeh galat|galat tha|wrong|गलत|ग़लत")
+        val USER_REPROMPT_REGEX = Regex(
+            "(?i)\\b(kahan|kaha|kidhar|kaunsa|kon\\s*sa|nahi\\s+dikh|nahi\\s+mil|samajh\\s+nahi|kuch\\s+nahi\\s+hua|phir\\s+se\\s+batao)\\b|" +
+                "कहाँ|किधर|कौन\\s*सा|नहीं\\s+दिख|नहीं\\s+मिल|समझ\\s+नहीं"
+        )
+
+        // Tier 1 local DOM matching triggers and filler words.
+        val LOCAL_UI_INTENT = Regex(
+            "(?i)\\b(where\\s+is|find|click|tap|open|kahan\\s+hai|kaha\\s+hai|dhundo|dabao|dabaun|kholo)\\b|" +
+                "कहाँ\\s+है|कहा\\s+है|ढूंढो|दबाओ|खोलो"
+        )
+        val LOCAL_UI_STOPWORDS = setOf(
+            "where", "is", "the", "a", "an", "find", "click", "tap", "on", "open", "button", "icon", "option",
+            "kahan", "kaha", "hai", "hain", "ko", "pe", "par", "mein", "me", "wala", "wali", "dhundo",
+            "dabao", "dabaun", "kholo", "kholna", "please", "zara", "mujhe", "dikhao",
+            "कहाँ", "कहा", "है", "को", "पे", "पर", "वाला", "वाली", "ढूंढो", "दबाओ", "खोलो",
+        )
     }
 }

@@ -10,18 +10,17 @@ import java.util.concurrent.Executors
  *
  * Each line holds the turn, her masked words, the state before the turn, the reply, whether it
  * passed validation, the latency and the model. No screen text is written: the masked screen title
- * is removed from the state. "Galat tha" copies the last line to a second file, which her son pulls
- * over USB.
+ * is removed from the state. "Galat tha" copies the last line to a second file.
  */
 class EvalLog(context: Context, private val prefs: Prefs) {
     private val dir: File? = context.applicationContext.getExternalFilesDir(null)
     private val io = Executors.newSingleThreadExecutor()
     private var lastLine: String? = null
 
-    /** Where the files are, for the adb pull command shown in setup. */
+    /** Directory where local eval logs are written. */
     val folder: String? get() = dir?.absolutePath
 
-    /** One model turn. level is which rung answered, for now always "gemini". */
+    /** One model turn, logged with level "gemini". Turns answered on the phone use [writeLocal]. */
     fun write(
         words: String?,
         stateBefore: JSONObject,
@@ -52,14 +51,17 @@ class EvalLog(context: Context, private val prefs: Prefs) {
         )
     }
 
-    /** A turn answered on the phone with no model call, such as "phir se" or an OTP warning. */
-    fun writeLocal(words: String, rule: String) {
+    /**
+     * A turn answered on the phone with no model call, such as "phir se", an OTP warning or a
+     * guide step. words is null for a step that followed a screen change.
+     */
+    fun writeLocal(words: String?, rule: String) {
         if (!prefs.evalLog) return
         record(
             JSONObject()
                 .put("time", System.currentTimeMillis())
                 .put("level", "local")
-                .put("words", words)
+                .put("words", words ?: JSONObject.NULL)
                 .put("intent", rule)
                 .put("validation", "ok")
                 .put("latency_ms", 0)

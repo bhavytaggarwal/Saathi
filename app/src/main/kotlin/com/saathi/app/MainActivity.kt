@@ -6,18 +6,22 @@ import android.app.AlarmManager
 import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.os.PowerManager
 import android.provider.Settings
 import android.speech.tts.TextToSpeech
-import android.text.InputType
 import android.util.TypedValue
+import android.view.Gravity
 import android.view.View
 import android.view.accessibility.AccessibilityManager
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
+import android.widget.Button
 import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
@@ -26,15 +30,23 @@ import android.widget.TextView
 import android.widget.Toast
 import com.saathi.app.core.Lines
 
-/** One-time setup, done by her son. Each step shows whether it is finished. */
+/**
+ * Senior-friendly voice-guided 3-step visual onboarding plus collapsible phone settings.
+ * Each onboarding step speaks its Hindi instruction aloud automatically when shown.
+ */
 class MainActivity : Activity() {
     private lateinit var prefs: Prefs
     private lateinit var voice: VoiceIO
     private lateinit var phone: PhoneHelp
     private val refreshers = ArrayList<() -> Unit>()
 
+    private lateinit var stepperContainer: LinearLayout
+    private lateinit var inAppAssistantContainer: LinearLayout
+    private var inAppAssistant: Assistant? = null
+    private var currentStepIndex = -1
+    private var lastSpokenStep = -1
+
     private lateinit var voiceSpinner: Spinner
-    private lateinit var geminiStatus: TextView
     private lateinit var voiceStatus: TextView
     private var voiceNames: List<String> = emptyList()
     private lateinit var packStatus: TextView
@@ -52,11 +64,24 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        updateOnboardingStep(autoSpeak = true)
+        refreshers.forEach { it() }
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        updateOnboardingStep(autoSpeak = true)
         refreshers.forEach { it() }
     }
 
     override fun onDestroy() {
         packStatus.removeCallbacks(packPoll)
+        inAppAssistant?.shutdown()
+        inAppAssistant = null
         voice.shutdown()
         super.onDestroy()
     }
@@ -65,35 +90,334 @@ class MainActivity : Activity() {
         val (scroll, root) = page()
         setContentView(scroll)
 
-        root.addView(title("Saathi setup"))
-        root.addView(body("Finish these steps once, then hand the phone to her. Saathi only reads and points. It never taps, types or swipes."))
+        root.addView(title("Saathi"))
 
-        root.addView(heading("1. Allow Saathi on this phone"))
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            root.addView(
-                step(
-                    "Allow restricted settings",
-                    "Directly installed apps need this before accessibility can be turned on. Open App info, tap ⋮ at the top right, then Allow restricted settings. If you see no such option, try the next step first: the option appears after Android blocks it once.",
-                    "Open App info",
-                    done = null,
-                ) {
-                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        // 3-Card Voice-Guided Visual Stepper
+        stepperContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+        root.addView(stepperContainer, wrapWithGap(12))
+
+        // In-app voice assistant host used when Accessibility is disabled (e.g. after Bank Mode step-out)
+        inAppAssistantContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        root.addView(inAppAssistantContainer, wrapWithGap(12))
+
+        // Quick link to Lists and Reminders
+        root.addView(
+            primaryButton("Lists and reminders kholein", 0xFF5C6B73.toInt()) {
+                startActivity(Intent(this, ListsActivity::class.java))
+            },
+            wrapWithGap(14),
+        )
+
+        // Collapsible advanced settings for family member / helper
+        val advancedContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+        }
+        val toggleAdvanced = TextView(this).apply {
+            text = "⚙️ Aur settings dikhayein (Battery, Voice, Naam)"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF0F5E5C.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(14), dp(12), dp(14))
+            setOnClickListener {
+                val show = advancedContainer.visibility != View.VISIBLE
+                advancedContainer.visibleIf(show)
+                text = if (show) {
+                    "⚙️ Aur settings chhupayein"
+                } else {
+                    "⚙️ Aur settings dikhayein (Battery, Voice, Naam)"
                 }
+            }
+        }
+        root.addView(toggleAdvanced, wrapWithGap(10))
+        root.addView(advancedContainer)
+
+        buildAdvancedSettings(advancedContainer)
+        updateOnboardingStep(autoSpeak = true)
+    }
+
+    private fun computeActiveStep(): Int {
+        val hasMic = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+        val hasAccessibility = isServiceOn()
+        if (hasAccessibility) {
+            prefs.pausedForBanking = false
+            prefs.onboardingCompleted = true
+            inAppAssistant?.shutdown()
+            inAppAssistant = null
+            if (::inAppAssistantContainer.isInitialized) {
+                inAppAssistantContainer.removeAllViews()
+                inAppAssistantContainer.visibility = View.GONE
+            }
+        }
+        return when {
+            !hasMic -> 1
+            // Do not nag the user on app launch if Accessibility was disabled after onboarding or
+            // automatically stepped out for a strict banking app.
+            !hasAccessibility && !prefs.pausedForBanking && !prefs.onboardingCompleted -> 2
+            else -> 3
+        }
+    }
+
+    private fun ensureInAppAssistant(): Assistant {
+        val existing = inAppAssistant
+        if (existing != null) return existing
+        inAppAssistantContainer.removeAllViews()
+        inAppAssistantContainer.visibility = View.VISIBLE
+        return Assistant(this).also { created ->
+            inAppAssistant = created
+            created.startInApp(inAppAssistantContainer)
+        }
+    }
+
+    private fun updateOnboardingStep(autoSpeak: Boolean) {
+        val step = computeActiveStep()
+        val stepChanged = step != currentStepIndex
+        currentStepIndex = step
+        stepperContainer.removeAllViews()
+
+        when (step) {
+            1 -> stepperContainer.addView(
+                buildStepCard(
+                    stepNumber = "Step 1 of 3",
+                    iconText = "🎙️",
+                    headline = "Bas boliye, main sunungi",
+                    spokenHindi = "बस बोलिए, मैं सुनूँगी। नीचे माइक अलाउ करें बटन दबाइए।",
+                    ctaLabel = "Mic allow karein",
+                    onCtaClick = {
+                        requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+                    },
+                )
+            )
+            2 -> stepperContainer.addView(
+                buildStepCard(
+                    stepNumber = "Step 2 of 3",
+                    iconText = "👆",
+                    headline = "Main aapko button dikhaungi",
+                    spokenHindi = "मैं आपको बटन दिखाऊँगी। नीचे साथी चालू करें बटन दबाइए।",
+                    ctaLabel = "Saathi chalu karein",
+                    onCtaClick = {
+                        voice.speak(AccessibilitySetupGuide.spokenInstruction())
+                        startActivity(AccessibilitySetupGuide.createSettingsIntent(this@MainActivity))
+                    },
+                    extraFooter = if (shouldShowSideloadHelp()) buildSideloadRestrictedHelp() else null,
+                )
+            )
+            else -> stepperContainer.addView(
+                buildStepCard(
+                    stepNumber = "Step 3 of 3",
+                    iconText = "✨",
+                    headline = "Shuru karein! Poochiye: 'Shopping list padho'",
+                    spokenHindi = "शुरू करें! पूछिए: शॉपिंग लिस्ट पढ़ो।",
+                    ctaLabel = "Shuru karein",
+                    onCtaClick = {
+                        voice.stopSpeaking()
+                        val assistant = SaathiAccessibilityService.instance?.assistant
+                        if (assistant != null) {
+                            assistant.onBubbleTap()
+                            moveTaskToBack(true)
+                        } else {
+                            // Keep all voice-only features (lists, reminders, alarms, scam checks,
+                            // bank_text_help) working in-app even while Accessibility is disabled.
+                            ensureInAppAssistant().onBubbleTap()
+                        }
+                    },
+                )
             )
         }
-        root.addView(
-            step(
-                "Turn on the Saathi accessibility service",
-                "This lets the character appear and read the allowed apps. Find Saathi under Downloaded apps.",
-                "Open Accessibility",
-                done = ::isServiceOn,
-            ) { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) }
-        )
-        root.addView(
-            step("Microphone", "To hear her questions. The mic opens only after she taps the character.", "Allow", done = {
-                checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-            }) { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1) }
-        )
+
+        if (autoSpeak && (stepChanged || lastSpokenStep != step)) {
+            lastSpokenStep = step
+            val speech = when (step) {
+                1 -> "बस बोलिए, मैं सुनूँगी। नीचे माइक अलाउ करें बटन दबाइए।"
+                2 -> "मैं आपको बटन दिखाऊँगी। नीचे साथी चालू करें बटन दबाइए।"
+                else -> "शुरू करें! पूछिए: शॉपिंग लिस्ट पढ़ो।"
+            }
+            stepperContainer.postDelayed({
+                if (!isDestroyed) voice.speak(speech)
+            }, 350)
+        }
+    }
+
+    private fun buildStepCard(
+        stepNumber: String,
+        iconText: String,
+        headline: String,
+        spokenHindi: String,
+        ctaLabel: String,
+        onCtaClick: () -> Unit,
+        extraFooter: View? = null,
+    ): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(20), dp(22), dp(20), dp(22))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = 24f * resources.displayMetrics.density
+                setStroke(dp(2), 0xFFE8730C.toInt())
+            }
+        }
+
+        // Top row: Step pill + "Dobara sunein" speaker button
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val stepBadge = TextView(this).apply {
+            text = stepNumber
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextColor(0xFF6A5D4D.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val replayBtn = TextView(this).apply {
+            text = "🔊 Dobara sunein"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextColor(0xFF0F5E5C.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = GradientDrawable().apply {
+                setColor(0xFFEAF4F3.toInt())
+                cornerRadius = 16f * resources.displayMetrics.density
+            }
+            setOnClickListener { voice.speak(spokenHindi) }
+        }
+        topRow.addView(stepBadge, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        topRow.addView(replayBtn)
+        card.addView(topRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        // High-contrast visual icon circle
+        val iconView = TextView(this).apply {
+            text = iconText
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 42f)
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xFFFFF3E0.toInt())
+                setStroke(dp(2), 0xFFE8730C.toInt())
+            }
+        }
+        val iconParams = LinearLayout.LayoutParams(dp(88), dp(88)).apply {
+            topMargin = dp(18)
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        card.addView(iconView, iconParams)
+
+        // Large 22sp+ senior-friendly headline
+        val headlineView = TextView(this).apply {
+            text = headline
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 23f)
+            setTextColor(0xFF1F1A14.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setLineSpacing(0f, 1.2f)
+        }
+        card.addView(headlineView, wrapWithGap(18))
+
+        // Single big bottom CTA button
+        val bigCta = Button(this, null, 0, 0).apply {
+            text = ctaLabel
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            typeface = Typeface.DEFAULT_BOLD
+            minimumHeight = dp(56)
+            gravity = Gravity.CENTER
+            setPadding(dp(20), dp(14), dp(20), dp(14))
+            background = GradientDrawable().apply {
+                setColor(0xFF0F5E5C.toInt())
+                cornerRadius = 28f * resources.displayMetrics.density
+            }
+            setOnClickListener { onCtaClick() }
+        }
+        card.addView(bigCta, wrapWithGap(22))
+
+        if (extraFooter != null) {
+            card.addView(extraFooter, wrapWithGap(14))
+        }
+        return card
+    }
+
+    /**
+     * Shown only on Android 13+ when the app was sideloaded (not installed from Google Play).
+     */
+    private fun shouldShowSideloadHelp(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return false
+        val installer = runCatching {
+            packageManager.getInstallSourceInfo(packageName).installingPackageName
+        }.getOrNull()
+        return installer != "com.android.vending"
+    }
+
+    /**
+     * Collapsible "Button disabled dikh raha hai?" 3-step on-phone guide for sideloaded installs.
+     * Contains zero computer/ADB references.
+     */
+    private fun buildSideloadRestrictedHelp(): View {
+        val wrapper = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        val guideBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            visibility = View.GONE
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = GradientDrawable().apply {
+                setColor(0xFFFFF8EF.toInt())
+                cornerRadius = 16f * resources.displayMetrics.density
+                setStroke(dp(1), 0xFFEADFD0.toInt())
+            }
+        }
+
+        val step1Text = TextView(this).apply {
+            text = "1. Neeche \"App Settings kholein\" button dabaiye."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF1F1A14.toInt())
+        }
+        val openAppInfoBtn = primaryButton("App Settings kholein", 0xFFE8730C.toInt()) {
+            startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+        }
+        val step2Text = TextView(this).apply {
+            text = "2. Top-right ke 3 dots (⋮) dabaiye → \"Allow restricted settings\" chuniye."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF1F1A14.toInt())
+        }
+        val step3Text = TextView(this).apply {
+            text = "3. Wapas aakar Saathi on kar dijiye."
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF1F1A14.toInt())
+        }
+
+        guideBox.addView(step1Text)
+        guideBox.addView(openAppInfoBtn, wrapWithGap(8))
+        guideBox.addView(step2Text, wrapWithGap(10))
+        guideBox.addView(step3Text, wrapWithGap(8))
+
+        val helpLink = TextView(this).apply {
+            text = "Button disabled dikh raha hai?"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF0F5E5C.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setPadding(dp(8), dp(8), dp(8), dp(8))
+            setOnClickListener {
+                val show = guideBox.visibility != View.VISIBLE
+                guideBox.visibleIf(show)
+                text = if (show) "Madad chhupayein ▲" else "Button disabled dikh raha hai?"
+            }
+        }
+
+        wrapper.addView(helpLink)
+        wrapper.addView(guideBox, wrapWithGap(6))
+        return wrapper
+    }
+
+    private fun buildAdvancedSettings(root: LinearLayout) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             root.addView(
                 step("Notifications", "To show reminders.", "Allow", done = {
@@ -110,7 +434,7 @@ class MainActivity : Activity() {
         }
         root.addView(soundFinderCard())
 
-        root.addView(heading("2. Stop the phone from killing Saathi"))
+        root.addView(heading("Stop the phone from killing Saathi"))
         root.addView(
             step("Battery: Unrestricted", "Phone makers stop background apps to save battery, which would stop reminders and the character.", "Turn off optimisation", done = {
                 getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
@@ -121,39 +445,24 @@ class MainActivity : Activity() {
         )
         val autoStart = autoStartIntents()
         if (autoStart.isNotEmpty()) {
-            root.addView(
-                step(
-                    "Auto-start (${Build.MANUFACTURER})",
-                    "This phone may stop Saathi in the background. Allow auto-start or background activity for Saathi. If App info opens instead, look under Battery there. If the phone has no such setting, the Battery step above is enough.",
-                    "Open auto-start",
-                    done = null,
-                ) { openAutoStart(autoStart) }
-            )
+            root.addView(oemAutoStartCard(autoStart))
+            root.addView(oemRecentsLockCard())
         }
 
-        root.addView(heading("3. Gemini"))
-        root.addView(geminiCard())
-
-        root.addView(heading("4. Voice"))
+        root.addView(heading("Voice"))
         root.addView(voiceCard())
 
-        root.addView(heading("5. About her"))
+        root.addView(heading("About her"))
         root.addView(aboutCard())
 
-        root.addView(heading("6. Testing (optional)"))
+        root.addView(heading("Testing (optional)"))
         root.addView(testingCard())
-
-        root.addView(heading("Lists and reminders"))
-        root.addView(
-            primaryButton("Open lists and reminders") { startActivity(Intent(this, ListsActivity::class.java)) },
-            wrapWithGap(4),
-        )
     }
 
     private fun soundFinderCard(): View {
         val card = step(
             "Sound finder (optional)",
-            "Lets Saathi name the app playing a sound. Android requires Notification access for this and will warn that it can read notifications. Saathi never reads them, and conversations (SMS and chats) start switched off. Leave them off. Turning them on in Android's settings is at your own risk and adds nothing to Saathi.",
+            "Lets Saathi name the app playing a sound. Android requires Notification access for this and will warn that it can read notifications. Saathi never reads them, and conversations (SMS and chats) start switched off. Leave them off.",
             "Open Notification access",
             done = { phone.hasMediaAccess },
         ) { startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)) } as LinearLayout
@@ -197,57 +506,56 @@ class MainActivity : Activity() {
         return card
     }
 
-    private fun geminiCard(): View {
-        val card = card()
-        card.addView(body("Paste a paid Gemini API key with a spending limit. It is stored encrypted on this phone. Saathi asks Google not to store each request. Also turn off Generate Content logging in AI Studio."))
-        val key = EditText(this).apply {
-            hint = if (prefs.apiKey.isBlank()) "Gemini API key" else "Key saved. Paste to replace."
-            inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-            setSingleLine(true)
-        }
-        val model = EditText(this).apply {
-            setText(prefs.model)
-            hint = Prefs.DEFAULT_MODEL
-            setSingleLine(true)
-        }
-        geminiStatus = body("")
-        card.addView(key, wrapWithGap(8))
-        card.addView(body("Model"), wrapWithGap(8))
-        card.addView(model)
+    private fun oemAutoStartCard(intents: List<Intent>): View {
+        val card = step(
+            "Auto-start (${Build.MANUFACTURER})",
+            "This phone may stop Saathi in the background. Allow auto-start or background activity for Saathi. If App info opens instead, look under Battery there.",
+            "Open auto-start",
+            done = { prefs.oemAutoStartDone },
+        ) { openAutoStart(intents) } as LinearLayout
         card.addView(
-            primaryButton("Save and test") {
-                val typed = key.text.toString().trim()
-                if (typed.isNotEmpty()) prefs.apiKey = typed
-                prefs.model = model.text.toString().ifBlank { Prefs.DEFAULT_MODEL }
-                key.text.clear()
-                key.hint = "Key saved. Paste to replace."
-                testGemini()
+            CheckBox(this).apply {
+                text = "I have enabled Auto-start / Unrestricted background usage"
+                isChecked = prefs.oemAutoStartDone
+                setOnCheckedChangeListener { _, checked ->
+                    prefs.oemAutoStartDone = checked
+                    refreshers.forEach { it() }
+                }
             },
-            wrapWithGap(10),
+            wrapWithGap(6),
         )
-        card.addView(geminiStatus, wrapWithGap(8))
         return card
     }
 
-    private fun testGemini() {
-        geminiStatus.text = "Testing..."
-        GeminiClient(prefs).ask(
-            "CONTEXT\nCurrent time: test\n\nSTATE:\n{\"turn\":1,\"goal\":null,\"screen\":{\"app\":\"setup\",\"readable\":false}}\n\n" +
-                "HISTORY (oldest first):\nnone\n\nHER WORDS: \"Namaste, aap kaun ho?\"",
-            null,
-        ) { result ->
-            geminiStatus.text = when (result) {
-                is GeminiClient.Result.Ok -> "✅ Working. Saathi says: ${result.reply.line.text}"
-                is GeminiClient.Result.Failed -> when (result.failure) {
-                    GeminiClient.Failure.NO_KEY -> "Paste a key first."
-                    GeminiClient.Failure.BAD_KEY -> "❌ Google refused this key or model. Check both."
-                    GeminiClient.Failure.NETWORK -> "❌ No internet."
-                    GeminiClient.Failure.QUOTA -> "❌ Quota or spending limit reached."
-                    GeminiClient.Failure.NO_CREDIT -> "❌ The key works, but its project has no credits left. Add credits in AI Studio under Billing."
-                    else -> "❌ Gemini gave an unexpected reply: ${result.failure}. Try again."
-                }
-            }
+    private fun oemRecentsLockCard(): View {
+        val card = card()
+        val name = TextView(this).apply {
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF1F1A14.toInt())
         }
+        card.addView(name)
+        card.addView(
+            body("1. Open Recent Apps.\n2. Tap the menu or hold the Saathi card at the top.\n3. Tap Lock / Pin so Clear All does not close Saathi."),
+            wrapWithGap(2),
+        )
+        card.addView(
+            CheckBox(this).apply {
+                text = "I have locked Saathi in Recent Apps"
+                isChecked = prefs.oemRecentsLockDone
+                setOnCheckedChangeListener { _, checked ->
+                    prefs.oemRecentsLockDone = checked
+                    refreshers.forEach { it() }
+                }
+            },
+            wrapWithGap(6),
+        )
+        val refresh = {
+            name.text = (if (prefs.oemRecentsLockDone) "✅  " else "⬜  ") + "Lock Saathi in Recent Apps"
+        }
+        refresh()
+        refreshers += refresh
+        card.layoutParams = wrapWithGap(8)
+        return card
     }
 
     private fun voiceCard(): View {
@@ -298,13 +606,11 @@ class MainActivity : Activity() {
 
         refreshers += {
             refreshPack()
-            // The voice engine starts up slowly, so its state is read a moment later.
             voiceStatus.postDelayed(::refreshVoices, 700)
         }
         return card
     }
 
-    /** Shows the real state of the Hindi pack, and keeps checking while a download runs. */
     private fun refreshPack() {
         voice.checkHindiPack { state ->
             if (isDestroyed) return@checkHindiPack
@@ -373,14 +679,13 @@ class MainActivity : Activity() {
         return card
     }
 
-    /** The eval log: off by default, and only for testing on her phone. */
     private fun testingCard(): View {
         val card = card()
         val log = EvalLog(this, prefs)
         card.addView(
             body(
                 "Save each turn on this phone to build test cases: her words with numbers masked, Saathi's state and reply, and timing. " +
-                    "No screen text is saved. A \"Galat tha\" button appears on the panel to mark a wrong reply. Turn this off before handing the phone over."
+                    "No screen text is saved. Turn this off before handing the phone over."
             )
         )
         card.addView(
@@ -391,9 +696,6 @@ class MainActivity : Activity() {
             },
             wrapWithGap(6),
         )
-        log.folder?.let { folder ->
-            card.addView(body("Copy the marked turns over USB:\nadb pull $folder/${EvalLog.MARKED_FILE}"), wrapWithGap(6))
-        }
         card.addView(
             primaryButton("Delete saved turns", 0xFF5C6B73.toInt()) {
                 log.clear()
@@ -411,7 +713,6 @@ class MainActivity : Activity() {
         return manager.isEnabled && enabled.split(':').any { it.equals(mine, ignoreCase = true) }
     }
 
-    /** The screen differs by phone and OS version, so each known one is tried, then App info. */
     private fun openAutoStart(intents: List<Intent>) {
         for (intent in intents) {
             if (runCatching { startActivity(intent) }.isSuccess) return

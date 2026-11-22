@@ -3,6 +3,7 @@ package com.saathi.app
 import android.accessibilityservice.AccessibilityService
 import android.animation.ValueAnimator
 import android.content.Context
+import android.content.Intent
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.Point
@@ -12,6 +13,7 @@ import android.graphics.drawable.GradientDrawable
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.provider.Settings
 import android.text.TextUtils
 import android.util.TypedValue
 import android.view.ContextThemeWrapper
@@ -28,13 +30,15 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import com.saathi.app.core.Lines
 import kotlin.math.abs
 
 /**
- * All of Saathi's windows, drawn with the accessibility overlay type so she needs no separate
- * "Display over other apps" permission. Must be created with the service's own context.
+ * All of Saathi's windows, drawn with the accessibility overlay type when running inside
+ * [SaathiAccessibilityService], or mounted in-app when Accessibility is disabled so voice-only
+ * features and the 1-tap re-enable card work seamlessly.
  */
-class OverlayController(private val service: AccessibilityService, private val prefs: Prefs, private val cb: Callbacks) {
+class OverlayController(private val context: Context, private val prefs: Prefs, private val cb: Callbacks) {
     interface Callbacks {
         fun onBubbleTap()
         fun onStopTapped()
@@ -46,17 +50,22 @@ class OverlayController(private val service: AccessibilityService, private val p
         fun onReminderDone()
         fun onReminderSnooze()
         fun onWrongTapped()
+        /** Her answer to "WhatsApp ki screen dekhun?". */
+        fun onConsentAnswered(yes: Boolean)
+        /** Tapped the 1-tap "Saathi chalu karein" button to open Accessibility Settings. */
+        fun onEnableAccessibilityTapped() = Unit
     }
 
-    private val wm = service.getSystemService(Context.WINDOW_SERVICE) as WindowManager
-    private val ui = ContextThemeWrapper(service, android.R.style.Theme_Material_Light_NoActionBar)
-    private val density = service.resources.displayMetrics.density
+    private val wm = context.getSystemService(Context.WINDOW_SERVICE) as WindowManager
+    private val ui = ContextThemeWrapper(context, android.R.style.Theme_Material_Light_NoActionBar)
+    private val density = context.resources.displayMetrics.density
     private val handler = Handler(Looper.getMainLooper())
 
     private val pointer = PointerView(ui).apply { visibility = View.GONE }
     private val bubble = CharacterView(ui)
     private var attached = false
     private var panelAttached = false
+    private var inAppAttached = false
     private var isDot = false
     private var panelAtTop = false
     private var mover: ValueAnimator? = null
@@ -150,23 +159,131 @@ class OverlayController(private val service: AccessibilityService, private val p
         addView(pillButton("10 minute baad", 0xFFE8730C.toInt()) { cb.onReminderSnooze() }, rowWeight())
     }
 
-    // Shown only while the eval log is on, for her son to mark a wrong reply while testing.
+    // Asked before an ask-first app is read.
+    private val consentRow = LinearLayout(ui).apply {
+        orientation = LinearLayout.HORIZONTAL
+        visibility = View.GONE
+        addView(pillButton("Haan", 0xFF23A455.toInt()) { cb.onConsentAnswered(true) }, rowWeight())
+        addView(pillButton("Nahi", 0xFF5C6B73.toInt()) { cb.onConsentAnswered(false) }, rowWeight())
+    }
+
+    // 1-tap Re-Enable card shown only when a turn requires live screen guidance and Accessibility is off.
+    private val enableAccessibilityCard = LinearLayout(ui).apply {
+        orientation = LinearLayout.VERTICAL
+        gravity = Gravity.CENTER_HORIZONTAL
+        visibility = View.GONE
+        setPadding(dp(16), dp(14), dp(16), dp(14))
+        background = GradientDrawable().apply {
+            setColor(Color.WHITE)
+            cornerRadius = 18 * density
+            setStroke(dp(2), 0xFF0F5E5C.toInt())
+        }
+        val titleView = TextView(ui).apply {
+            text = Lines.ENABLE_ACCESSIBILITY_TITLE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+            setTextColor(0xFF1F1A14.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        }
+        val enableBtn = Button(ui, null, 0, 0).apply {
+            text = Lines.ENABLE_ACCESSIBILITY_BUTTON
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            typeface = Typeface.DEFAULT_BOLD
+            minimumHeight = dp(54)
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            background = GradientDrawable().apply {
+                setColor(0xFF0F5E5C.toInt())
+                cornerRadius = 26 * density
+            }
+            setOnClickListener {
+                showEnableAccessibilityCard(false)
+                cb.onEnableAccessibilityTapped()
+                val intent = AccessibilitySetupGuide.createSettingsIntent(context, newTask = true)
+                runCatching { context.startActivity(intent) }
+            }
+        }
+        addView(titleView)
+        addView(enableBtn, topGap(12))
+    }
+
+    // Shown for as long as she has allowed an ask-first app to be read, so it is never secret.
+    private val accessNote = TextView(ui).apply {
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+        setTextColor(0xFF0F5E5C.toInt())
+        typeface = Typeface.DEFAULT_BOLD
+        maxLines = 1
+        visibility = View.GONE
+    }
+
+    // One-tap button on the expanded panel to flag a bad output ("Galat hai / Report").
     private val evalRow = LinearLayout(ui).apply {
         orientation = LinearLayout.HORIZONTAL
         gravity = Gravity.END
-        visibility = View.GONE
+        visibility = View.VISIBLE
         addView(
-            pillButton("Galat tha", 0xFF8A7F73.toInt()) { cb.onWrongTapped() },
+            pillButton("Galat hai / Report", 0xFF8A7F73.toInt()) { cb.onWrongTapped() },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)),
         )
     }
+    private var panelCustomY = -1
     private val panel = object : FrameLayout(ui) {
+        private var downY = 0f
+        private var startTop = 0
+        private var draggingPanel = false
+        private val touchSlop = dp(10)
+
         override fun dispatchKeyEvent(event: KeyEvent): Boolean {
             if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP && inputRow.visibility == VISIBLE) {
                 hideInput()
                 return true
             }
             return super.dispatchKeyEvent(event)
+        }
+
+        override fun onInterceptTouchEvent(event: MotionEvent): Boolean {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downY = event.rawY
+                    val loc = IntArray(2).also(::getLocationOnScreen)
+                    startTop = loc[1]
+                    draggingPanel = false
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    if (abs(event.rawY - downY) > touchSlop) {
+                        draggingPanel = true
+                        return true
+                    }
+                }
+            }
+            return super.onInterceptTouchEvent(event)
+        }
+
+        override fun onTouchEvent(event: MotionEvent): Boolean {
+            when (event.actionMasked) {
+                MotionEvent.ACTION_MOVE -> {
+                    val dy = event.rawY - downY
+                    if (!draggingPanel && abs(dy) > touchSlop) draggingPanel = true
+                    if (draggingPanel && panelAttached) {
+                        val maxTop = (screen().y - height - dp(16)).coerceAtLeast(dp(24))
+                        val newTop = (startTop + dy.toInt()).coerceIn(dp(24), maxTop)
+                        panelCustomY = newTop
+                        panelParams.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                        panelParams.y = newTop
+                        runCatching { wm.updateViewLayout(this, panelParams) }
+                        return true
+                    }
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (draggingPanel) {
+                        draggingPanel = false
+                        return true
+                    }
+                }
+            }
+            return super.onTouchEvent(event)
         }
     }.apply {
         val card = LinearLayout(ui).apply {
@@ -178,12 +295,18 @@ class OverlayController(private val service: AccessibilityService, private val p
                 setStroke(dp(2), 0xFFE8730C.toInt())
             }
             elevation = 10 * density
-            // A slim strip expands when she taps it.
-            setOnClickListener { setCompact(false) }
+            // Tapping the banner at any time interrupts Saathi and listens. A slim strip expands first.
+            setOnClickListener {
+                if (compact) setCompact(false)
+                cb.onListenTapped()
+            }
+            addView(accessNote)
             addView(heard)
             addView(message)
+            addView(enableAccessibilityCard, topGap(10))
             addView(inputRow, topGap(6))
             addView(reminderRow, topGap(6))
+            addView(consentRow, topGap(6))
             addView(actionRow, topGap(6))
             addView(evalRow, topGap(4))
         }
@@ -201,7 +324,9 @@ class OverlayController(private val service: AccessibilityService, private val p
     )
     private var compact = false
     private var reminderShown = false
-    private var evalShown = false
+    private var consentShown = false
+    private var enableAccessibilityShown = false
+    private var evalShown = true
 
     private fun rowWeight() = LinearLayout.LayoutParams(0, dp(BUTTON_DP), 1f).apply {
         setMargins(dp(3), 0, dp(3), 0)
@@ -230,7 +355,7 @@ class OverlayController(private val service: AccessibilityService, private val p
     // Lifecycle
 
     fun attach() {
-        if (attached) return
+        if (attached || context !is AccessibilityService) return
         attached = true
         // The order sets the stacking: spotlight lowest, then the face, then the panel.
         wm.addView(pointer, pointerParams)
@@ -246,7 +371,23 @@ class OverlayController(private val service: AccessibilityService, private val p
         }
     }
 
+    /** Mounts the assistant panel inside an Activity container when Accessibility is disabled. */
+    fun attachInApp(container: ViewGroup) {
+        if (attached) return
+        (panel.parent as? ViewGroup)?.removeView(panel)
+        container.addView(
+            panel,
+            ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT),
+        )
+        panel.visibility = View.VISIBLE
+        inAppAttached = true
+    }
+
     fun detach() {
+        if (inAppAttached) {
+            (panel.parent as? ViewGroup)?.removeView(panel)
+            inAppAttached = false
+        }
         if (!attached) return
         attached = false
         mover?.cancel()
@@ -318,8 +459,13 @@ class OverlayController(private val service: AccessibilityService, private val p
             panel.visibility = View.VISIBLE
             return
         }
-        panelParams.gravity = (if (panelAtTop) Gravity.TOP else Gravity.BOTTOM) or Gravity.CENTER_HORIZONTAL
-        panelParams.y = panelOffset()
+        if (panelCustomY >= 0) {
+            panelParams.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            panelParams.y = panelCustomY
+        } else {
+            panelParams.gravity = (if (panelAtTop) Gravity.TOP else Gravity.BOTTOM) or Gravity.CENTER_HORIZONTAL
+            panelParams.y = panelOffset()
+        }
         wm.addView(panel, panelParams)
         panelAttached = true
     }
@@ -334,7 +480,7 @@ class OverlayController(private val service: AccessibilityService, private val p
     private fun panelOffset() = dp(if (panelAtTop) 30 else 42)
 
     private fun placePanel(atTop: Boolean) {
-        if (panelAtTop == atTop) return
+        panelCustomY = -1
         panelAtTop = atTop
         if (panelAttached) {
             panelParams.gravity = (if (atTop) Gravity.TOP else Gravity.BOTTOM) or Gravity.CENTER_HORIZONTAL
@@ -366,6 +512,25 @@ class OverlayController(private val service: AccessibilityService, private val p
         panel.keepScreenOn = on
     }
 
+    fun showConsentButtons(show: Boolean) {
+        consentShown = show
+        if (show) compact = false
+        updatePanelRows()
+    }
+
+    /** Shows or hides the 1-tap Re-Enable Accessibility card when screen guidance is requested. */
+    fun showEnableAccessibilityCard(show: Boolean) {
+        enableAccessibilityShown = show
+        if (show) compact = false
+        updatePanelRows()
+    }
+
+    /** A short note above the message, or null to remove it. */
+    fun setAccessNote(text: String?) {
+        accessNote.text = text.orEmpty()
+        updatePanelRows()
+    }
+
     fun showEvalButton(show: Boolean) {
         evalShown = show
         updatePanelRows()
@@ -373,7 +538,7 @@ class OverlayController(private val service: AccessibilityService, private val p
 
     /** Slim strip of up to two lines, so the app beneath stays visible while she follows a step. */
     fun setCompact(value: Boolean) {
-        compact = value && !reminderShown
+        compact = value && !reminderShown && !consentShown && !enableAccessibilityShown
         updatePanelRows()
     }
 
@@ -381,7 +546,10 @@ class OverlayController(private val service: AccessibilityService, private val p
         heard.visibility = if (compact || heard.text.isNullOrBlank()) View.GONE else View.VISIBLE
         message.setTextSize(TypedValue.COMPLEX_UNIT_SP, if (compact) COMPACT_TEXT_SP else FULL_TEXT_SP)
         message.maxLines = if (compact) COMPACT_LINES else FULL_LINES
+        enableAccessibilityCard.visibility = if (enableAccessibilityShown) View.VISIBLE else View.GONE
         reminderRow.visibility = if (reminderShown) View.VISIBLE else View.GONE
+        consentRow.visibility = if (consentShown && !reminderShown) View.VISIBLE else View.GONE
+        accessNote.visibility = if (accessNote.text.isNullOrBlank()) View.GONE else View.VISIBLE
         actionRow.visibility = if (compact || reminderShown) View.GONE else View.VISIBLE
         evalRow.visibility = if (evalShown && !compact && !reminderShown) View.VISIBLE else View.GONE
     }
@@ -429,7 +597,7 @@ class OverlayController(private val service: AccessibilityService, private val p
         val size = screen()
         setCompact(true)
         if (target != null) {
-            placePanel(target.centerY() > size.y / 2)
+            placePanel(target.centerY() > size.y * 2 / 5)
             val destination = besideTarget(target, size)
             moveBubble(destination.x, destination.y)
             pointer.setArrowStart(destination.x + bubbleSize / 2f, destination.y + bubbleSize / 2f)

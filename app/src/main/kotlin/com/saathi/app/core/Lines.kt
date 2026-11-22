@@ -2,11 +2,34 @@ package com.saathi.app.core
 
 /** Fixed lines that must work with no AI and no internet. */
 object Lines {
+    /** Shown the moment she taps, before the recognizer is ready. */
+    val LISTENING_NOW = Line("Sun rahi hoon...", "सुन रही हूँ...")
     val WAITING = Line("Main ruki hoon, aaram se karo.", "मैं रुकी हूँ, आराम से करो।")
     val PRIVACY = Line(
         "Ab apna PIN daalo, main thodi der ke liye chhup jaati hoon.",
         "अब अपना PIN डालो, मैं थोड़ी देर के लिए छुप जाती हूँ।",
     )
+    /** Spoken when a strict banking or UPI app launches directly and Saathi calls disableSelf(). */
+    const val BANK_STEP_OUT_SPEECH =
+        "Suraksha ke liye Saathi band kar diya hai. Ab back jaakar ek baar phir se app kholein."
+    val BANK_STEP_OUT = Line(BANK_STEP_OUT_SPEECH, BANK_STEP_OUT_SPEECH)
+
+    /** Spoken when a merchant checkout / payment options screen is detected before GPay/UPI launches. */
+    const val CHECKOUT_PAYMENT_STEP_OUT_SPEECH =
+        "Ab payment screen aa gayi hai. Suraksha ke liye main Saathi band kar rahi hoon. Ab aap Google Pay par dabakar payment kar dijiye."
+    val CHECKOUT_PAYMENT_STEP_OUT = Line(CHECKOUT_PAYMENT_STEP_OUT_SPEECH, CHECKOUT_PAYMENT_STEP_OUT_SPEECH)
+
+    /** 1-tap re-enable card copy and spoken prompt when a turn needs live screen guidance while Accessibility is off. */
+    const val ENABLE_ACCESSIBILITY_TITLE = "Screen dekhne ke liye Saathi chalu karein"
+    const val ENABLE_ACCESSIBILITY_BUTTON = "Saathi chalu karein"
+    const val ENABLE_ACCESSIBILITY_SPEECH =
+        "Screen dekhne ke liye neeche wala button dabaiye, aur Saathi ko on kar dijiye."
+    val ENABLE_ACCESSIBILITY_PROMPT = Line(ENABLE_ACCESSIBILITY_SPEECH, ENABLE_ACCESSIBILITY_SPEECH)
+
+    /** Spoken immediately with QUEUE_FLUSH when the user taps "Saathi chalu karein" to open Accessibility Settings. */
+    /** Spoken as soon as SaathiAccessibilityService.onServiceConnected() fires. */
+    const val ACCESSIBILITY_CONNECTED_SPEECH = "Saathi chalu ho gaya hai"
+    val ACCESSIBILITY_CONNECTED = Line(ACCESSIBILITY_CONNECTED_SPEECH, "साथी चालू हो गया है।")
     val DONE = Line("Bahut badhiya! Ho gaya.", "बहुत बढ़िया! हो गया।")
     val UNSURE = Line(
         "Mujhe ye screen samajh nahi aa rahi. Ek baar peeche jaake phir try karein?",
@@ -57,8 +80,56 @@ object Lines {
         "Koi baat nahi, phir se karte hain. Ek baar aur boliye.",
         "कोई बात नहीं, फिर से करते हैं। एक बार और बोलिए।",
     )
-    /** Said when the model's reply was invalid twice in a row. */
-    val RETRY_FAILED = Line("Ek second, phir se dekhti hoon.", "एक second, फिर से देखती हूँ।")
+    /** Said when the model's reply was invalid or timed out twice in a row. */
+    val RETRY_FAILED = Line("Ek second, main phir se dekh rahi hoon.", "एक सेकंड, मैं फिर से देख रही हूँ।")
+    /** Asked before an ask-first app such as WhatsApp is read, with Haan and Nahi buttons. */
+    val CONSENT = Line(
+        "WhatsApp ki screen dekhun? Sirf buttons dekhungi, messages nahi.",
+        "WhatsApp की screen देखूँ? सिर्फ़ buttons देखूँगी, messages नहीं।",
+    )
+    /** The same question, when she already said Haan once during this goal. */
+    val CONSENT_AGAIN = Line("Phir se WhatsApp ki screen dekhun?", "फिर से WhatsApp की screen देखूँ?")
+    val CONSENT_DECLINED = Line(
+        "Theek hai, screen nahi dekhungi. Main bataati hoon, aap karte jaao.",
+        "ठीक है, screen नहीं देखूँगी। मैं बताती हूँ, आप करते जाओ।",
+    )
+    val ACCESS_ENDED = Line("Ab main WhatsApp nahi dekh rahi.", "अब मैं WhatsApp नहीं देख रही।")
+    /** Shown in the panel for as long as she has allowed Saathi to read WhatsApp. */
+    const val ACCESS_NOTE = "WhatsApp: sirf buttons dekh rahi hoon"
+
+    /** Said when the Edit option is missing from a sent message's menu. */
+    val EDIT_TOO_LATE = Line(
+        "Edit nahi dikh raha? WhatsApp thodi der tak hi message badalne deta hai.",
+        "Edit नहीं दिख रहा? WhatsApp थोड़ी देर तक ही message बदलने देता है।",
+    )
+    /** Said instead of using a number she spoke during a guide. The number was masked and not sent. */
+    val TYPE_NUMBER = Line(
+        "Number aap khud type kijiye. Main number nahi sunti.",
+        "Number आप खुद type कीजिए। मैं number नहीं सुनती।",
+    )
+
+    private val ORDINALS = listOf(
+        "pehli" to "पहली", "doosri" to "दूसरी", "teesri" to "तीसरी", "chauthi" to "चौथी",
+        "paanchvi" to "पाँचवीं", "chhathi" to "छठी", "saatvi" to "सातवीं", "aathvi" to "आठवीं",
+        "nauvi" to "नौवीं", "dasvi" to "दसवीं",
+    )
+
+    /**
+     * Points her at a button found on the phone. A list row is named by counting from the top,
+     * because she may not be able to read the English label. Otherwise she follows the orange ring.
+     */
+    fun tapHere(row: Int?): Line {
+        val ordinal = row?.let { ORDINALS.getOrNull(it - 1) }
+        return if (ordinal != null) {
+            Line(
+                "Upar se ${ordinal.first} line par dabaiye, jahan ghera bana hai.",
+                "ऊपर से ${ordinal.second} line पर दबाइए, जहाँ घेरा बना है।",
+            )
+        } else {
+            Line("Jahan ghera bana hai, wahan dabaiye.", "जहाँ घेरा बना है, वहाँ दबाइए।")
+        }
+    }
+
     val REMINDER_SET = Line("Theek hai, yaad dila dungi.", "ठीक है, याद दिला दूँगी।")
     val NOTED = Line("Theek hai, maine note kar liya.", "ठीक है, मैंने note कर लिया।")
 

@@ -20,9 +20,12 @@ import android.speech.SpeechRecognizer
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
+import android.os.SystemClock
 import android.util.Log
+import com.saathi.app.core.ListenPolicy
 import java.util.Locale
 import java.util.UUID
+import java.util.concurrent.CopyOnWriteArraySet
 
 /** Hindi speech in and out. The microphone is open only between listen() and its result. */
 class VoiceIO(context: Context, private val prefs: Prefs) {
@@ -56,11 +59,28 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
     private var ttsStarting = true
 
     // A line asked for while the engine was still starting, such as a reminder due at a restart.
-    private var queued: Pair<String, (() -> Unit)?>? = null
+    private var queued: Triple<String, Float, (() -> Unit)?>? = null
     private val callbacks = HashMap<String, () -> Unit>()
+
+    // The done callback waits a moment after speech ends. stopSpeaking() cancels it, so a line she
+    // interrupted can never reopen the mic later over her own words.
+    private val pendingDone = HashMap<String, Runnable>()
+
+    // Some engines never report the end of a line. This ends it anyway, so the mic still reopens.
+    private val stuckGuards = HashMap<String, Runnable>()
+
+    /** True from speak() until the line ends, is stopped or fails. */
+    var isSpeaking = false
+        private set
+
+    /** When speech last ended, from SystemClock.uptimeMillis(). */
+    var speechEndedAt = 0L
+        private set
     private var recognizer: SpeechRecognizer? = null
 
     // The mic must always close. Recognizers can ignore the silence settings, so these enforce it.
+    private val accumulatedSegments = ArrayList<String>()
+    private var currentSegment = ""
     private var lastPartial = ""
     private var activeListener: Listener? = null
     private var retried = false
@@ -75,14 +95,16 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
     var onSpeakingChanged: ((Boolean) -> Unit)? = null
 
     init {
+        activeInstances += this
         tts = TextToSpeech(appContext) { status ->
             main.post {
                 ttsReady = status == TextToSpeech.SUCCESS
                 ttsStarting = false
                 if (ttsReady) configureTts()
-                queued?.let { (speech, onDone) ->
+                queued?.let { (speech, rate, onDone) ->
                     queued = null
-                    speak(speech, onDone)
+                    isSpeaking = false
+                    speak(speech, rate, onDone)
                 }
             }
         }
@@ -108,19 +130,38 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
             override fun onStop(utteranceId: String, interrupted: Boolean) {
                 main.post {
                     callbacks.remove(utteranceId)
-                    onSpeakingChanged?.invoke(false)
+                    stuckGuards.remove(utteranceId)?.let(main::removeCallbacks)
+                    markSilent()
                     audio.abandonAudioFocusRequest(focusRequest)
                 }
             }
         })
     }
 
+    // onDone and onError both end here, so the mic re-arms after a failed line as well.
     private fun finished(id: String) {
         main.post {
-            onSpeakingChanged?.invoke(false)
+            stuckGuards.remove(id)?.let(main::removeCallbacks)
+            markSilent()
             audio.abandonAudioFocusRequest(focusRequest)
-            callbacks.remove(id)?.invoke()
+            val callback = callbacks.remove(id)
+            if (callback != null) {
+                // Wait after TTS ends and audio focus is released, so the speaker's tail is not
+                // heard as her words.
+                val run = Runnable {
+                    pendingDone.remove(id)
+                    callback.invoke()
+                }
+                pendingDone[id] = run
+                main.postDelayed(run, TTS_DONE_DELAY_MS)
+            }
         }
+    }
+
+    private fun markSilent() {
+        if (isSpeaking) speechEndedAt = SystemClock.uptimeMillis()
+        isSpeaking = false
+        onSpeakingChanged?.invoke(false)
     }
 
     /** Hindi voices installed on this phone, downloaded voices first. */
@@ -156,12 +197,18 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         if (ttsReady) pickVoice()?.let { tts?.voice = it }
     }
 
-    /** Speaks one line, replacing whatever was being said. */
+    /** Speaks one line with QUEUE_FLUSH, replacing whatever was being said. */
     fun speak(speech: String, onDone: (() -> Unit)? = null) {
+        speak(speech, prefs.speechRate, onDone)
+    }
+
+    /** Speaks one line at a specific speech [rate] (e.g. 1.08f for brisk guidance steps). */
+    fun speak(speech: String, rate: Float, onDone: (() -> Unit)? = null) {
         val engine = tts
         if (engine != null && !ttsReady && ttsStarting) {
             // Spoken as soon as the engine is ready. A newer line replaces it, as QUEUE_FLUSH would.
-            queued = speech to onDone
+            queued = Triple(speech, rate, onDone)
+            isSpeaking = true
             return
         }
         if (engine == null || !ttsReady) {
@@ -169,8 +216,18 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
             return
         }
         val id = UUID.randomUUID().toString()
+        // QUEUE_FLUSH replaces the line being said, and its callback goes with it.
+        cancelPendingCallbacks()
         onDone?.let { callbacks[id] = it }
-        engine.setSpeechRate(prefs.speechRate)
+        isSpeaking = true
+        val guard = Runnable {
+            Log.w(TAG, "tts never reported the end of a line; ending it")
+            runCatching { engine.stop() }
+            finished(id)
+        }
+        stuckGuards[id] = guard
+        main.postDelayed(guard, ListenPolicy.stuckSpeechMs(speech.length, rate))
+        engine.setSpeechRate(rate)
         audio.requestAudioFocus(focusRequest)
         val params = Bundle().apply { putFloat(TextToSpeech.Engine.KEY_PARAM_VOLUME, 1f) }
         if (engine.speak(speech, TextToSpeech.QUEUE_FLUSH, params, id) != TextToSpeech.SUCCESS) {
@@ -180,10 +237,32 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
 
     fun stopSpeaking() {
         queued = null
-        callbacks.clear()
+        cancelPendingCallbacks()
         tts?.stop()
-        onSpeakingChanged?.invoke(false)
+        markSilent()
         audio.abandonAudioFocusRequest(focusRequest)
+    }
+
+    private fun cancelPendingCallbacks() {
+        callbacks.clear()
+        pendingDone.values.forEach(main::removeCallbacks)
+        pendingDone.clear()
+        stuckGuards.values.forEach(main::removeCallbacks)
+        stuckGuards.clear()
+    }
+
+    /**
+     * Speaks one final line (such as the banking step-out reassurance) and shuts down the TTS
+     * engine as soon as the utterance completes, surviving AccessibilityService.disableSelf().
+     */
+    fun speakAndShutdown(speech: String) {
+        stopListening()
+        val fallbackShutdown = Runnable { shutdown() }
+        main.postDelayed(fallbackShutdown, FINAL_SPEECH_TIMEOUT_MS)
+        speak(speech) {
+            main.removeCallbacks(fallbackShutdown)
+            shutdown()
+        }
     }
 
     val hasMicPermission: Boolean
@@ -235,31 +314,66 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN")
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, !prefs.allowOnlineSpeech)
-        // Older speakers pause more while thinking, so she gets longer before the mic closes.
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
-        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2000L)
+        // Older speakers pause more while thinking, so natural pauses do not prematurely end recognition.
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_COMPLETE_SILENCE_LENGTH_MILLIS, 3500L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_POSSIBLY_COMPLETE_SILENCE_LENGTH_MILLIS, 2500L)
+        putExtra(RecognizerIntent.EXTRA_SPEECH_INPUT_MINIMUM_LENGTH_MILLIS, 5000L)
+    }
+
+    private fun updatePartialBuffer(rawSegment: String): String {
+        val clean = rawSegment.trim()
+        if (clean.isEmpty()) return lastPartial
+        if (currentSegment.isNotEmpty()) {
+            val prevLower = currentSegment.lowercase(hindi)
+            val nextLower = clean.lowercase(hindi)
+            val prevFirstWord = prevLower.substringBefore(' ')
+            // If the recognizer reset its active hypothesis after a pause, keep the previous segment.
+            val isResetAfterPause = clean.length < currentSegment.length / 2 &&
+                !nextLower.startsWith(prevFirstWord) &&
+                !prevLower.startsWith(nextLower)
+            if (isResetAfterPause) {
+                accumulatedSegments += currentSegment
+            }
+        }
+        currentSegment = clean
+        lastPartial = (accumulatedSegments + currentSegment).joinToString(" ").trim()
+        return lastPartial
     }
 
     private fun start(speech: SpeechRecognizer, onDevice: Boolean, listener: Listener) {
         recognizer = speech
         activeListener = listener
+        accumulatedSegments.clear()
+        currentSegment = ""
         lastPartial = ""
         main.postDelayed(noSpeech, NO_SPEECH_MS)
         speech.setRecognitionListener(object : RecognitionListener {
             override fun onResults(results: Bundle) {
-                val heard = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.trim().orEmpty().ifEmpty { lastPartial.trim() }
+                val finalSegment = results.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.trim().orEmpty()
+                val buffered = lastPartial.trim()
+                val heard = when {
+                    finalSegment.isEmpty() -> buffered
+                    accumulatedSegments.isNotEmpty() -> (accumulatedSegments + finalSegment).joinToString(" ").trim()
+                    buffered.length > finalSegment.length && buffered.lowercase(hindi).startsWith(finalSegment.lowercase(hindi)) -> buffered
+                    else -> finalSegment
+                }
                 stopListening()
                 if (heard.isEmpty()) listener.onNothingHeard() else listener.onHeard(heard)
             }
 
             override fun onPartialResults(partial: Bundle) {
-                val text = partial.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
-                    ?.firstOrNull()?.takeIf { it.isNotBlank() } ?: return
+                val stable = partial.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)
+                    ?.firstOrNull()?.trim().orEmpty()
+                val unstable = partial.getStringArrayList("android.speech.extra.UNSTABLE_TEXT")
+                    ?.firstOrNull()?.trim().orEmpty()
+                val combined = listOf(stable, unstable).filter { it.isNotEmpty() }.joinToString(" ").trim()
+                if (combined.isEmpty()) return
                 main.removeCallbacks(noSpeech)
-                if (text != lastPartial) {
-                    lastPartial = text
-                    listener.onPartial(text)
+                val previous = lastPartial
+                val updated = updatePartialBuffer(combined)
+                if (updated != previous) {
+                    listener.onPartial(updated)
                     // A pause this long after her last new word means she has finished.
                     main.removeCallbacks(endOfSpeech)
                     main.postDelayed(endOfSpeech, END_OF_SPEECH_MS)
@@ -401,6 +515,8 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         main.removeCallbacks(endOfSpeech)
         main.removeCallbacks(retry)
         activeListener = null
+        accumulatedSegments.clear()
+        currentSegment = ""
         lastPartial = ""
         recognizer?.let {
             runCatching { it.cancel() }
@@ -410,18 +526,31 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
     }
 
     fun shutdown() {
+        activeInstances -= this
         stopListening()
         stopSpeaking()
         tts?.shutdown()
         tts = null
     }
 
-    private companion object {
-        const val TAG = "SaathiVoice"
+    companion object {
+        const val GUIDE_SPEECH_RATE = 1.08f
+        private val activeInstances = CopyOnWriteArraySet<VoiceIO>()
+
+        /** Stops any pending or ongoing TTS across all VoiceIO instances (e.g. setup TTS when service connects). */
+        fun stopAllSpeaking() {
+            for (instance in activeInstances) {
+                runCatching { instance.stopSpeaking() }
+            }
+        }
+
+        private const val TAG = "SaathiVoice"
         const val NO_SPEECH_MS = 9_000L
-        const val END_OF_SPEECH_MS = 2_500L
+        const val END_OF_SPEECH_MS = 3_500L
         const val MAX_SPEECH_MS = 25_000L
         const val RETRY_MS = 400L
+        const val TTS_DONE_DELAY_MS = ListenPolicy.ECHO_GAP_MS
+        const val FINAL_SPEECH_TIMEOUT_MS = 15_000L
         const val ERROR_LANGUAGE_NOT_SUPPORTED = 12
         const val ERROR_LANGUAGE_UNAVAILABLE = 13
     }

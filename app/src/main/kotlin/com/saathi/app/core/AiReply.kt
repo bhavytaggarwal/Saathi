@@ -31,6 +31,8 @@ data class AiReply(
     val action: ReplyAction? = null,
     val statePatch: JSONObject? = null,
     val raw: String = "",
+    /** A prepared guide the model chose for her request, from [Guides.IDS]. The app runs it. */
+    val guide: String? = null,
 ) {
     sealed interface Parsed {
         data class Ok(val reply: AiReply) : Parsed
@@ -102,6 +104,7 @@ data class AiReply(
                     action = action,
                     statePatch = json.optJSONObject("state_patch"),
                     raw = cleaned,
+                    guide = json.optString("guide").takeIf { it in Guides.IDS },
                 )
             )
         }

@@ -31,7 +31,8 @@ Each request carries a small state object (about 150 tokens) plus the last 4 tur
     "app": "Google Pay",
     "title": "Select your bank",
     "changed": true,
-    "readable": true
+    "readable": true,
+    "mode": "full"
   },
   "pending_question": null,
   "last_action": {
@@ -50,9 +51,11 @@ Each request carries a small state object (about 150 tokens) plus the last 4 tur
 | `goal.app` | Model | The app the task happens in, if any |
 | `goal.status` | Model sets done or abandoned; app sets expired | active, done, abandoned, expired |
 | `goal.step` | App | Number of guide steps given for this goal |
+| `goal.guide` | App | The prepared guide running for this goal (`whatsapp_add_contact`, `whatsapp_message_new_number`, `whatsapp_edit_message`), or null. The model cannot set or change it |
 | `goal.idle_s` | App | Seconds since she last spoke or the screen last changed |
 | `last_step.*` | Model writes target_label and expected_next; app writes matched and retries | What Saathi pointed at, what screen should come next, and whether it did |
 | `screen.*` | App | Facts from the accessibility service. readable: false for blocked apps and payment screens |
+| `screen.mode` | App | full (masked element list), ask_first (WhatsApp, not asked yet), controls_only (she said Haan: known buttons only, the rest `[hidden]`), not_shared (she said Nahi) or blocked |
 | `pending_question` | Model | A question Saathi asked and is waiting on, with its options |
 | `last_action` | App, from the model's action | The last thing actually saved (list item, reminder), so "aur Maggi bhi" and "usko hata do" work |
 
@@ -130,13 +133,22 @@ WHEN YOU ARE NOT SURE
 
 GUIDE STEPS
 - One step per reply. Point at exactly one element by its number.
-- Use the button's label exactly as on screen, plus where it is and its colour.
+- She may not read English. Say first where it is, so she finds it without reading:
+  for a list row (row=3/8), count from the top: "upar se teesri line". Otherwise give
+  the place, such as "neeche right mein". Then say in simple Hindi what it is for.
+- Say the label at most once, without quotes.
+- Say "dabaiye", never "tap" or "click".
+- Name a colour only when a picture of the screen is attached.
+- If what she needs is not in SCREEN and the LIST line says more rows below, reply
+  guide_step with target_element null and gesture "swipe_up":
+  "Screen par ungli rakhkar upar kheenchiye." Never point at a wrong row instead.
 - Set state_patch.last_step.expected_next to what the next screen should be.
 - If STATE.last_step.matched is false, the screen did not change as expected:
   say so gently and look at the screen again before the next step.
 - If the screen already shows the goal is complete, intent "goal_done", congratulate her,
   and set goal.status "done".
-- If SCREEN is missing or readable is false, help by conversation only (bank_text_help).
+- If SCREEN is missing or readable is false, help by conversation only (bank_text_help),
+  except when STATE.screen.mode is ask_first (see SCREEN MODES).
 
 SAFETY
 - Never ask for a PIN, OTP, password, CVV, card number or account number.
@@ -216,6 +228,12 @@ Decided while building it, on 2026-11-08 and 2026-11-09:
 | matched: the model judges, the app records whether the screen changed | The app sets matched to false only when the screen did not change, and leaves it null otherwise for the model to judge | Same rule, made concrete |
 | screen.title | The highest plain-text label, masked, sent only on turns that send the screen list anyway, and left out of the testing log | "Lists, reminders and chat never send the screen" stays true |
 | Last 4 turns | 4 exchanges, each her words and Saathi's line | |
+| screen has app, title, changed, readable | Also `mode`, and a SCREEN MODES section at the end of the prompt | Added with WhatsApp "ask first" on 2026-11-12, so the model knows when it sees only buttons, when to wait for her consent, and when to help by conversation |
+| Reply has no guide field | Optional `guide`: one of the prepared guide ids, or "none". The app then runs that guide itself | Added with the WhatsApp guides on 2026-11-12. The phone matches most requests itself. This catches the ones its keywords miss |
+| Every guide step comes from the model | Steps of a prepared guide come from data on the phone. Gemini is asked only when the screen fits no expected step, with a GUIDE line in the prompt. Local steps are logged with level `local` | Cheaper and more predictable for the commonest WhatsApp tasks |
 | Log line fields | Also intent, tokens in and out, and which level answered (`gemini` or `local`). Local rules are logged too | To measure how often no model is needed |
+| `screen.app` and `screen.mode` | Ordinary apps, system permission prompts (`permissioncontroller`), and Google Pay (`com.google.android.apps.nbu.paisa.user`, except on PIN/payment/`FLAG_SECURE` screens) are `full` (`ALLOWED`) by default via `Allowlist.kt`; strict banking apps (`Allowlist.STRICT_BANK_PACKAGES`: YONO SBI, YONO Lite, HDFC, iMobile Pay, Axis, Kotak811, bob World, PNB One) trigger automatic Bank Mode (`disableSelf()`); other financial/UPI apps (`PhonePe`, `Paytm`, `CRED`, `BHIM`) immediately pause/hide the overlay; and WhatsApp (`com.whatsapp`) is `ask_first` / `controls_only` / `not_shared` | Updated on 2026-11-21 so strict banking apps never refuse to open while cross-app handoffs (e.g. Play Store → Flipkart + first-launch permission prompts) and Google Pay guidance work seamlessly |
+| 3-Tier Edge-to-Cloud Triage & `trace_id` | Tier 1 (`LocalCommandParser.kt`, `Assistant.tryLocalDomMatch`, and `Guides.kt`) resolves unambiguous `list_read`, `list_clear`, `alarm_set`, `reminder_set`, exact UI label lookups, and prepared WhatsApp guides on-device (`<50ms`, `local_tier1_<ts>`); Tier 2 (`gemini-3.5-flash-lite`, `thinking_level="MINIMAL"`) handles non-UI text turns on Cloud Run with automatic retry on Tier 3 if invalid JSON or `confidence < 0.75`; Tier 3 (`gemini-4-hydrogen`, `thinking_level="LOW"` / `"MEDIUM"`) handles screen guidance, WhatsApp privacy modes, banking/safety/scam triggers, and recovery via Cloud Run `/v1/ask`, returning a UUID4 `trace_id` for structured Cloud Logging (`saathi_audit_trace`) and one-tap `/v1/report` flagging (`flagged_outputs/{trace_id}`, `owner: "bhavyta"`) | Updated on 2026-11-19 for 70–80% Vertex AI cost reduction, 100% eval accuracy, and production auditability |
+| Crisp `guide_step` speech, trimmed DOM & `6s` timeout | `guide_step` instructions are strictly 1 short sentence (max 8–10 Hindi words) spoken at `1.08f` (`VoiceIO.GUIDE_SPEECH_RATE`); `ScreenReader.kt` trims invisible/tiny (`<= 4px`)/decorative views (`MAX_ELEMENTS = 48`); `Assistant.kt` debounces screen changes by `1000ms`, shows `"Dekh rahi hoon..."` while in flight, and enforces a `6-second` timeout watchdog with 1 auto-retry and spoken fallback (`"Ek second, main phir se dekh rahi hoon"`) | Added on 2026-11-21 to eliminate silent hangs and keep guidance brisk across app transitions |
 
 **Measured on 2026-11-08,** in one real call: Gemini accepted the full schema with `store: false` and minimal thinking, in 2.3 seconds. The request used 1,596 prompt tokens, against the 600–900 estimated in section 3 for a list turn, mostly because of the system instruction.

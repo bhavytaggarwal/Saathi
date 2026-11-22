@@ -11,10 +11,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 
-/** Calls the Gemini API directly. It has no tools, so the model can only name an element to point at. */
+/** Calls the Saathi Cloud Run + Vertex AI proxy. It has no tools, so the model can only name an element to point at. */
 class GeminiClient(private val prefs: Prefs) {
     /** NO_CREDIT is HTTP 402: the project's prepaid credits are used up, so no model will answer. */
-    enum class Failure { NO_KEY, BAD_KEY, NETWORK, QUOTA, NO_CREDIT, BLOCKED, BAD_REPLY, SERVER }
+    enum class Failure { BAD_KEY, NETWORK, QUOTA, NO_CREDIT, BLOCKED, BAD_REPLY, SERVER }
 
     sealed interface Result {
         val model: String?
@@ -26,6 +26,7 @@ class GeminiClient(private val prefs: Prefs) {
             override val latencyMs: Long = 0,
             val tokensIn: Int = 0,
             val tokensOut: Int = 0,
+            val traceId: String? = null,
         ) : Result
 
         /** detail says what was wrong with a BAD_REPLY, so it can be sent back to the model once. */
@@ -52,10 +53,10 @@ class GeminiClient(private val prefs: Prefs) {
 
     /** prompt holds the state, history, screen and her words, in that order. */
     fun ask(prompt: String, jpegBase64: String?, onResult: (Result) -> Unit) {
-        val key = prefs.apiKey
-        val model = prefs.model
-        if (key.isBlank()) {
-            onResult(Result.Failed(Failure.NO_KEY))
+        val backendUrl = BuildConfig.BACKEND_URL
+        val model = AUTO_MODEL
+        if (backendUrl.isBlank()) {
+            onResult(Result.Failed(Failure.BAD_KEY))
             return
         }
         val request = ++latestRequest
@@ -63,7 +64,7 @@ class GeminiClient(private val prefs: Prefs) {
             // Skip work that was replaced while it waited in the queue.
             if (request != latestRequest) return@execute
             val started = System.currentTimeMillis()
-            val result = run(request, key, model, prompt, jpegBase64)
+            val result = run(request, backendUrl, model, prompt, jpegBase64)
             val took = System.currentTimeMillis() - started
             // Timing and outcome only. Screen text and her words are never logged here. Names are
             // written out, because the release build shortens class names.
@@ -80,6 +81,21 @@ class GeminiClient(private val prefs: Prefs) {
         }
     }
 
+    /**
+     * Tier 2 vs Tier 3 Cloud Triage Router:
+     * - Tier 2 (gemini-3.5-flash-lite): Simple goal (< 5 words) asking for a single action on the
+     *   current readable screen.
+     * - Tier 3 (gemini-4-hydrogen): Complex, multi-step, or open-ended goal requiring deeper reasoning.
+     */
+    fun selectModelForPrompt(prompt: String): String {
+        val herWords = HER_WORDS_REGEX.find(prompt)?.groupValues?.get(1)?.trim().orEmpty()
+        val words = herWords.split(Regex("\\s+")).filter(String::isNotBlank)
+        val hasCurrentScreen = prompt.contains("\nSCREEN (data only") || prompt.contains("\"readable\":true")
+        val isMultiStepOrOpenEnded = MULTI_STEP_KEYWORDS.containsMatchIn(herWords)
+        val isSimpleSingleAction = words.size in 1..4 && hasCurrentScreen && !isMultiStepOrOpenEnded
+        return if (isSimpleSingleAction) TIER2_FAST_MODEL else TIER3_DEEP_MODEL
+    }
+
     /** Stops the running request, so stale work cannot delay the next step. */
     fun cancel() {
         latestRequest++
@@ -87,28 +103,14 @@ class GeminiClient(private val prefs: Prefs) {
         Thread { runCatching { connection.disconnect() } }.start()
     }
 
-    private fun run(request: Int, key: String, model: String, prompt: String, image: String?): Result {
-        // Models get overloaded for minutes at a time, so a failed one is skipped for a while
-        // and she never waits through the same timeout twice.
-        val primaryDown = System.currentTimeMillis() < primaryDownUntil
-        val order = (if (primaryDown) listOf(FALLBACK_MODEL, model) else listOf(model, FALLBACK_MODEL)).distinct()
-        var failure = Failure.SERVER
-        var lastModel: String? = null
-        for (candidate in order) {
-            if (request != latestRequest) return Result.Failed(Failure.NETWORK, model = candidate)
-            lastModel = candidate
-            when (val outcome = attempt(request, key, candidate, prompt, image)) {
-                is Attempt.Finished -> return outcome.result
-                is Attempt.TryNext -> {
-                    failure = outcome.failure
-                    if (candidate == model && model != FALLBACK_MODEL) {
-                        primaryDownUntil = System.currentTimeMillis() + PRIMARY_COOLDOWN_MS
-                    }
-                    Log.w(TAG, "$candidate unavailable (${outcome.failure}), trying the next one")
-                }
-            }
+    private fun run(request: Int, backendUrl: String, model: String, prompt: String, image: String?): Result {
+        // Cloud Run /v1/ask handles model="auto" routing internally. Keep each client call to a
+        // single 6-second bounded attempt so Assistant.kt can retry once or speak immediately.
+        if (request != latestRequest) return Result.Failed(Failure.NETWORK, model = model)
+        return when (val outcome = attempt(request, backendUrl, model, prompt, image)) {
+            is Attempt.Finished -> outcome.result
+            is Attempt.TryNext -> Result.Failed(outcome.failure, model = model)
         }
-        return Result.Failed(failure, model = lastModel)
     }
 
     private sealed interface Attempt {
@@ -116,11 +118,11 @@ class GeminiClient(private val prefs: Prefs) {
         data class TryNext(val failure: Failure) : Attempt
     }
 
-    private fun attempt(request: Int, key: String, model: String, prompt: String, image: String?): Attempt {
+    private fun attempt(request: Int, backendUrl: String, model: String, prompt: String, image: String?): Attempt {
         var level = compatibility[model] ?: 0
         while (true) {
             val response = try {
-                post(key, model, buildBody(prompt, image, level), image != null)
+                post(backendUrl, buildBody(model, prompt, image, level), image != null)
             } catch (_: IOException) {
                 // A cancelled request also lands here, and must not be sent again.
                 if (request != latestRequest) return Attempt.Finished(Result.Failed(Failure.NETWORK, model = model))
@@ -156,18 +158,20 @@ class GeminiClient(private val prefs: Prefs) {
 
     private class HttpResponse(val code: Int, val body: String)
 
-    private fun post(key: String, model: String, body: String, hasImage: Boolean): HttpResponse {
-        val url = URL("https://generativelanguage.googleapis.com/v1beta/models/$model:generateContent")
+    private fun post(backendUrl: String, body: String, hasImage: Boolean): HttpResponse {
+        val url = URL("${backendUrl.trimEnd('/')}/v1/ask")
         val connection = url.openConnection() as HttpURLConnection
         active = connection
         try {
             connection.requestMethod = "POST"
-            connection.connectTimeout = 4_000
-            // Healthy replies take under 3 seconds. Longer means the model is overloaded.
-            connection.readTimeout = if (hasImage) 12_000 else 7_000
+            connection.connectTimeout = 3_000
+            // 6-second timeout on guidance LLM calls so Saathi never hangs silently.
+            connection.readTimeout = 6_000
             connection.doOutput = true
             connection.setRequestProperty("Content-Type", "application/json; charset=utf-8")
-            connection.setRequestProperty("x-goog-api-key", key)
+            if (BuildConfig.CLIENT_SECRET.isNotBlank()) {
+                connection.setRequestProperty("X-Saathi-Client-Secret", BuildConfig.CLIENT_SECRET)
+            }
             connection.outputStream.use { it.write(body.toByteArray()) }
             val code = connection.responseCode
             val stream = if (code in 200..299) connection.inputStream else connection.errorStream
@@ -197,11 +201,13 @@ class GeminiClient(private val prefs: Prefs) {
         return when (val parsed = AiReply.parse(text)) {
             is AiReply.Parsed.Ok -> {
                 val usage = root.optJSONObject("usageMetadata")
+                val traceId = root.optString("trace_id", "").ifBlank { null }
                 Result.Ok(
                     parsed.reply,
                     model,
                     tokensIn = usage?.optInt("promptTokenCount") ?: 0,
                     tokensOut = (usage?.optInt("candidatesTokenCount") ?: 0) + (usage?.optInt("thoughtsTokenCount") ?: 0),
+                    traceId = traceId,
                 )
             }
             is AiReply.Parsed.Invalid -> {
@@ -211,37 +217,77 @@ class GeminiClient(private val prefs: Prefs) {
         }
     }
 
-    private fun buildBody(prompt: String, image: String?, level: Int): String {
-        val parts = JSONArray().put(JSONObject().put("text", prompt))
-        if (image != null) {
-            parts.put(JSONObject().put("inlineData", JSONObject().put("mimeType", "image/jpeg").put("data", image)))
-        }
-        val contents = JSONArray().put(JSONObject().put("role", "user").put("parts", parts))
-
-        val config = JSONObject()
-            .put("responseMimeType", "application/json")
-            .put("maxOutputTokens", 2048)
-        // Level 3 drops the schema, level 2 drops thinking control and level 1 drops the store opt-out.
-        if (level < 3) config.put("responseJsonSchema", JSONObject(RESPONSE_SCHEMA))
-        // Measured: MINIMAL answers in under 2 seconds. LOW was slower and once ran out of output
-        // tokens mid-reply. A model that refuses MINIMAL falls through the compatibility levels.
-        if (level < 2) config.put("thinkingConfig", JSONObject().put("thinkingLevel", "MINIMAL"))
-
-        // The system instruction comes first and never changes, so Gemini can cache it.
+    private fun buildBody(model: String, prompt: String, image: String?, level: Int): String {
         val body = JSONObject()
-            .put("systemInstruction", JSONObject().put("parts", JSONArray().put(JSONObject().put("text", Prompts.SYSTEM))))
-            .put("contents", contents)
-            .put("generationConfig", config)
-        // Screen data is for this one step only. Asks Google not to store the request.
-        if (level < 1) body.put("store", false)
+            .put("device_id", prefs.deviceId)
+            .put("model", model)
+            .put("prompt", prompt)
+            .put("level", level)
+        if (image != null) {
+            body.put("jpeg_base64", image)
+        } else {
+            body.put("jpeg_base64", JSONObject.NULL)
+        }
         return body.toString()
+    }
+
+    /** Sends a user-flagged bad output to POST /v1/report for replay and review (owner: bhavyta). */
+    fun reportFlaggedOutput(
+        traceId: String,
+        lastUtterance: String?,
+        lastReply: String?,
+        currentApp: String,
+        targetLabel: String?,
+        reason: String = "user_flagged_wrong",
+    ) {
+        val backendUrl = BuildConfig.BACKEND_URL
+        if (backendUrl.isBlank()) return
+        val payload = JSONObject()
+            .put("trace_id", traceId)
+            .put("device_id", prefs.deviceId)
+            .put("last_utterance", lastUtterance.orEmpty())
+            .put("last_reply", lastReply.orEmpty())
+            .put("current_app", currentApp)
+            .put("target_label", targetLabel ?: JSONObject.NULL)
+            .put("reason", reason)
+            .toString()
+        executor.execute {
+            runCatching {
+                val url = URL("${backendUrl.trimEnd('/')}/v1/report")
+                val conn = url.openConnection() as HttpURLConnection
+                try {
+                    conn.requestMethod = "POST"
+                    conn.connectTimeout = 4_000
+                    conn.readTimeout = 5_000
+                    conn.doOutput = true
+                    conn.setRequestProperty("Content-Type", "application/json; charset=utf-8")
+                    if (BuildConfig.CLIENT_SECRET.isNotBlank()) {
+                        conn.setRequestProperty("X-Saathi-Client-Secret", BuildConfig.CLIENT_SECRET)
+                    }
+                    conn.outputStream.use { it.write(payload.toByteArray()) }
+                    val code = conn.responseCode
+                    Log.i(TAG, "reported flagged output trace=$traceId HTTP $code")
+                } finally {
+                    conn.disconnect()
+                }
+            }
+        }
     }
 
     private companion object {
         const val TAG = "SaathiGemini"
         const val MAX_COMPATIBILITY = 3
+        const val AUTO_MODEL = "auto"
+        const val TIER2_FAST_MODEL = "gemini-3.5-flash-lite"
+        const val TIER3_DEEP_MODEL = "gemini-4-hydrogen"
         const val FALLBACK_MODEL = "gemini-3.5-flash-lite"
         const val PRIMARY_COOLDOWN_MS = 60_000L
+
+        val HER_WORDS_REGEX = Regex("(?m)^HER WORDS:\\s*\"([^\"]*)\"")
+        val MULTI_STEP_KEYWORDS = Regex(
+            "(?i)\\b(how\\s+to|why|explain|and\\s+then|after\\s+that|kaise|kyun|kya\\s+hai|aur\\s+phir|pehle)\\b|" +
+                "कैसे|क्यों|क्या\\s+है|और\\s+फिर"
+        )
 
         const val RESPONSE_SCHEMA = """
 {
@@ -252,6 +298,7 @@ class GeminiClient(private val prefs: Prefs) {
     "say_roman": {"type": "string"},
     "say_devanagari": {"type": "string"},
     "target_element": {"type": ["integer", "null"]},
+    "guide": {"type": "string", "enum": ["none","whatsapp_add_contact","whatsapp_message_new_number","whatsapp_edit_message"]},
     "gesture": {"type": "string", "enum": ["none","tap","swipe_up","swipe_down","swipe_left","swipe_right","nav_recents","nav_back","nav_home"]},
     "action": {
       "type": ["object", "null"],
@@ -326,19 +373,36 @@ HOW TO READ HER WORDS
 
 WHEN YOU ARE NOT SURE
 - If two meanings are likely, reply with intent "clarify": one short question with
-  2 options, and set state_patch.pending_question. Never guess an action.
-- Example: "doodh khatam" with no context → "Doodh list mein daalun ya reminder lagaun?"
+  2 options, set action to null, and set state_patch.pending_question. Never guess an action.
+- CRITICAL RULE 1 (Shortage without verb): If she only says something is finished or out of stock
+  (e.g. "doodh khatam ho gaya", "aata khatam hai") with no active goal and does NOT explicitly say
+  "list" or "reminder", you MUST reply with intent "clarify" ("Doodh list mein daalun ya reminder lagaun?"),
+  set action to null, and set state_patch.pending_question. Never guess list_add.
+- CRITICAL RULE 2 (Reminder without time): If she asks to set a reminder (e.g. "dawai ka reminder laga do")
+  but HER WORDS do NOT contain a specific time or hour (such as "9 baje", "subah", "shaam", "raat"),
+  you MUST reply with intent "clarify" ("Dawai ka reminder kis time lagaun?"), set action to null,
+  and set state_patch.pending_question. Never invent or default to a time like 21:00.
 - If you understood nothing, ask her to say it once more in simple words.
 
 GUIDE STEPS
 - One step per reply. Point at exactly one element by its number.
-- Use the button's label exactly as on screen, plus where it is and its colour.
+- For guide_step, every spoken instruction MUST be strictly 1 short sentence, maximum 8 to 10 Hindi words, naming ONLY the immediate tap or action (no filler, no greeting, no repetition).
+- She may not read English. Say first where it is, so she finds it without reading:
+  for a list row (row=3/8), count from the top: "upar se teesri line". Otherwise give
+  the place, such as "neeche right mein". Then name the button to tap.
+- Say the label at most once, without quotes.
+- Say "dabaiye", never "tap" or "click".
+- Name a colour only when a picture of the screen is attached.
+- If what she needs is not in SCREEN and the LIST line says more rows below, reply
+  guide_step with target_element null and gesture "swipe_up":
+  "Screen par ungli rakhkar upar kheenchiye." Never point at a wrong row instead.
 - Set state_patch.last_step.expected_next to what the next screen should be.
 - If STATE.last_step.matched is false, the screen did not change as expected:
   say so gently and look at the screen again before the next step.
 - If the screen already shows the goal is complete, intent "goal_done", congratulate her,
   and set goal.status "done".
-- If SCREEN is missing or readable is false, help by conversation only (bank_text_help).
+- If SCREEN is missing or readable is false, help by conversation only (bank_text_help),
+  except when STATE.screen.mode is ask_first (see SCREEN MODES).
 
 SAFETY
 - Never ask for a PIN, OTP, password, CVV, card number or account number.
@@ -347,7 +411,7 @@ SAFETY
 - Alarms are set in the Clock app by her. Teach it with alarm_teach; never claim it is set.
 
 HOW YOU SPEAK
-- Short Hinglish sentences, under 15 words, one instruction at a time.
+- Strictly 1 short sentence, maximum 8–10 Hindi words for guide_step (under 15 words for other intents), naming only the immediate action with zero filler.
 - say_roman for the screen bubble, say_devanagari for the voice. Same meaning.
 - Warm and calm: "Koi baat nahi, phir se karte hain." Never "galat".
 - Use a feminine first person ("main ruki hoon", "dila dungi").
@@ -360,15 +424,29 @@ INTENTS AND FIELDS
 - alarm_teach: the same, for teaching her to set an alarm in the Clock app (goal kind "alarm_teach").
 - goal_done, chat, clarify, bank_text_help: say_roman and say_devanagari are what she hears.
 - stop: she wants to stop ("rehne do", "band karo"). Set goal.status "abandoned".
-- list_add, list_remove (also when she has bought it: "aata le aayi"), list_check (is it on the list), list_read, list_clear: set action with "list" and, for add, remove and check, "items". Each item has "name" in Roman, "name_hi" in Devanagari and "qty" such as "2 packet", or empty. Leave say_* empty: the app answers from what it saved.
-- reminder_set: action {"type":"reminder_set","text":"dawai","text_hi":"दवाई","time":"21:00","repeat":"daily"}. For a one-time reminder, "repeat":"once" and time "yyyy-MM-dd HH:mm" worked out from the current time. Confirm in say_*: "Theek hai, kal subah 10 baje yaad dila dungi." Say reminder or yaad, never alarm. With no clear time, use clarify.
+- list_add, list_remove (also when she has bought it: "aata le aayi"), list_check (is it on the list), list_read, list_clear: set action with "list" and, for add, remove and check, "items". Each item has "name" in Roman, "name_hi" in Devanagari and "qty" keeping her exact unit word such as "2 packet", "1 kilo", "2 litre", or empty. Leave say_* empty: the app answers from what it saved.
+- reminder_set: ONLY when she gave a clear time. Set action {"type":"reminder_set","text":"dawai","text_hi":"दवाई","time":"21:00","repeat":"daily"}. For a one-time reminder, "repeat":"once" and time "yyyy-MM-dd HH:mm" worked out from the current time. Confirm in say_*: "Theek hai, kal subah 10 baje yaad dila dungi." Say reminder or yaad, never alarm. If HER WORDS gave no clear time, you MUST use intent "clarify" with action null instead of reminder_set.
 - reminder_list, sound_find (she asks where a sound is coming from): leave say_* empty.
 - confidence: from 0 to 1, how sure you are that you understood her.
 - state_patch.goal: {"text","kind","app","status"}. kind is guide, list, reminder, alarm_teach, sound, bank_text_help or chat. A different kind starts a new goal. text is her task in short English.
 
 SCREEN FORMAT
-Elements are listed as: #number type "label" tappable|text-only position x y w h (percent of the screen). "(no label)" means an unnamed button, which only a picture can identify. Point only at tappable numbers in the list. [number] and [id] are masked private values; never guess them. A picture, when attached, may show Saathi's own face and orange ring: ignore those.
+Elements are listed as: #number type "label" tappable|text-only position x y w h (percent of the screen). "(no label)" means an unnamed button, which only a picture can identify. A list row ends with row=k/n: its place among the n visible rows of the main list, counted from the top. A last line "LIST: ..." says whether that list scrolls and has more rows below the screen. Point only at tappable numbers in the list. [number] and [id] are masked private values; never guess them. A picture, when attached, may show Saathi's own face and orange ring: ignore those.
 To close a background app, first use gesture "nav_recents". On the recent-apps screen, use "swipe_up" and point at that app's card.
 If CONTEXT lists a task she has done before, give shorter hints and encourage her to try the next step herself.
+
+SCREEN MODES (STATE.screen.mode)
+- full: the masked element list above.
+- ask_first: an app such as WhatsApp that is read only with her permission. If her request needs this screen, reply guide_step with the goal set (kind "guide"), target_element null and say_roman and say_devanagari empty: the app asks her and then sends the screen. Otherwise answer normally.
+- controls_only: she allowed it. Only known buttons have labels. "[hidden]" is private content such as names, messages, previews and photos. You cannot see it: never guess it, never ask her what it says, and never point at a [hidden] element. When she must tap something hidden, such as a chat or her own message, set target_element null and say in words where it is: "Jis message ko badalna hai, us par ungli dabake rakho." A text box shows only has_text=yes or no. looks="..." is what a button looks like: say that, with where it is, instead of its English label alone.
+- not_shared: she said Nahi. Guide her by conversation only, one short step at a time, with no target_element. Never ask her to read out names or messages.
+- blocked: Saathi never reads this app. Help by conversation only.
+
+PREPARED GUIDES
+The app has step-by-step guides for these WhatsApp tasks and runs them itself:
+- whatsapp_add_contact: save a new number as a contact.
+- whatsapp_message_new_number: message a number that is not saved.
+- whatsapp_edit_message: change a message she already sent.
+If her request is one of them, reply guide_step with "guide" set to its id, say_roman and say_devanagari empty, and target_element null. Otherwise set "guide" to "none". A GUIDE line in the prompt means a guide is already running.
 """.trim()
 }

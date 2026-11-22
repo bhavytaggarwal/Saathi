@@ -14,3 +14,7 @@ secrets.properties
 *.jks
 eval/results/
 __pycache__/
+*.aab
+*.bak
+.venv/
+venv/

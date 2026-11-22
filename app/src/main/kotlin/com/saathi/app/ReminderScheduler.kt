@@ -216,9 +216,9 @@ class ReminderScheduler(context: Context) {
         private const val CHANNEL = "reminders"
         private const val NOTIFICATION_BASE = 1000
         private const val DAY_MS = 24 * 60 * 60 * 1000L
-        const val ACTION_FIRE = "com.saathi.app.FIRE"
-        const val ACTION_DONE = "com.saathi.app.DONE"
-        const val ACTION_SNOOZE = "com.saathi.app.SNOOZE"
+        const val ACTION_FIRE = "${BuildConfig.APPLICATION_ID}.FIRE"
+        const val ACTION_DONE = "${BuildConfig.APPLICATION_ID}.DONE"
+        const val ACTION_SNOOZE = "${BuildConfig.APPLICATION_ID}.SNOOZE"
         const val EXTRA_ID = "id"
     }
 }

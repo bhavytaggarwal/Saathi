@@ -2,33 +2,54 @@ plugins {
     id("com.android.application")
 }
 
-// A personal build can carry a Gemini key, read from the git-ignored secrets.properties:
-//   ./gradlew assembleRelease -Psaathi.embedKey=true
-// Anyone holding that APK can extract the key, so it must never be shared or uploaded.
-// The default build carries no key and asks for one in setup.
-val embeddedGeminiKey: String = if (providers.gradleProperty("saathi.embedKey").orNull == "true") {
-    val secrets = providers.fileContents(rootProject.layout.projectDirectory.file("secrets.properties")).asText.get()
-    Regex("(?m)^GEMINI_API_KEY=(.+)$").find(secrets)?.groupValues?.get(1)?.trim()
-        ?: throw GradleException("secrets.properties has no GEMINI_API_KEY")
+// A test-phone build that writes WhatsApp's button labels to a file, for checking ControlsOnly:
+//   ./gradlew assembleRelease -Psaathi.labelProbe=true
+val labelProbe = providers.gradleProperty("saathi.labelProbe").orNull == "true"
+
+// Reads BACKEND_URL and CLIENT_SECRET from the git-ignored secrets.properties into BuildConfig.
+val secretsFile = rootProject.layout.projectDirectory.file("secrets.properties")
+val secretsText: String = if (!labelProbe && secretsFile.asFile.exists()) {
+    providers.fileContents(secretsFile).asText.get()
 } else {
     ""
 }
+val backendUrl: String = Regex("(?m)^BACKEND_URL=(.+)$").find(secretsText)?.groupValues?.get(1)?.trim().orEmpty()
+val clientSecret: String = Regex("(?m)^CLIENT_SECRET=(.+)$").find(secretsText)?.groupValues?.get(1)?.trim().orEmpty()
+val keystorePath: String = Regex("(?m)^KEYSTORE_FILE=(.+)$").find(secretsText)?.groupValues?.get(1)?.trim().orEmpty()
+val keystorePassword: String = Regex("(?m)^KEYSTORE_PASSWORD=(.+)$").find(secretsText)?.groupValues?.get(1)?.trim().orEmpty()
+val keyAliasValue: String = Regex("(?m)^KEY_ALIAS=(.+)$").find(secretsText)?.groupValues?.get(1)?.trim().orEmpty()
+val keyPasswordValue: String = Regex("(?m)^KEY_PASSWORD=(.+)$").find(secretsText)?.groupValues?.get(1)?.trim().orEmpty()
+val keystoreFile = keystorePath.takeIf { it.isNotEmpty() }?.let { rootProject.file(it) }
 
 android {
     namespace = "com.saathi.app"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.saathi.app"
+        applicationId = "in.getsaathi.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
-        buildConfigField("String", "EMBEDDED_GEMINI_KEY", "\"$embeddedGeminiKey\"")
+        versionCode = 2
+        versionName = "0.1.1"
+        buildConfigField("String", "BACKEND_URL", "\"$backendUrl\"")
+        buildConfigField("String", "CLIENT_SECRET", "\"$clientSecret\"")
+        buildConfigField("boolean", "LABEL_PROBE", labelProbe.toString())
+        if (labelProbe) versionNameSuffix = "-probe"
     }
 
     buildFeatures {
         buildConfig = true
+    }
+
+    signingConfigs {
+        if (keystoreFile != null && keystoreFile.exists()) {
+            create("release") {
+                storeFile = keystoreFile
+                storePassword = keystorePassword
+                keyAlias = keyAliasValue
+                keyPassword = keyPasswordValue
+            }
+        }
     }
 
     buildTypes {
@@ -36,9 +57,7 @@ android {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"))
-            // v1 is installed directly on the phone, so the debug key is enough. A Play release
-            // would need a real upload key.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
@@ -50,6 +69,11 @@ android {
     testOptions {
         unitTests.isReturnDefaultValues = true
     }
+}
+
+// GuidesTest reads the router cases in eval/, so editing them reruns the tests.
+tasks.withType<Test>().configureEach {
+    inputs.file(rootProject.layout.projectDirectory.file("eval/router_cases.jsonl"))
 }
 
 dependencies {
@@ -83,9 +107,7 @@ val auditReadOnly = tasks.register("auditReadOnly") {
             problems += "accessibility_service_config.xml declares canPerformGestures"
         }
         val allowlist = Regex("android:packageNames=\"([^\"]*)\"").find(config)?.groupValues?.get(1)
-        if (allowlist.isNullOrBlank()) {
-            problems += "accessibility_service_config.xml has no package allowlist"
-        } else {
+        if (!allowlist.isNullOrBlank()) {
             listOf("whatsapp", "messaging", "truecaller", "android.gm", "systemui", "sbi", "hdfc", "icici")
                 .filter { allowlist.contains(it, ignoreCase = true) }
                 .forEach { problems += "allowlist contains never-allowed package: $it" }

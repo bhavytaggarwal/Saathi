@@ -1,0 +1,18 @@
+{"words": "WhatsApp mein message edit kaise karte hain", "in_whatsapp": false, "guide": "whatsapp_edit_message", "note": "Feature 2 request from mom"}
+{"words": "whatsapp pe bheja hua message badalna hai", "in_whatsapp": false, "guide": "whatsapp_edit_message"}
+{"words": "व्हाट्सएप पर मैसेज बदलना है", "in_whatsapp": false, "guide": "whatsapp_edit_message", "note": "Devanagari from the recogniser"}
+{"words": "galat likh diya message, theek kaise karun", "in_whatsapp": true, "guide": "whatsapp_edit_message", "note": "in WhatsApp, so no need to name it"}
+{"words": "WhatsApp mein naya number save karna hai", "in_whatsapp": false, "guide": "whatsapp_add_contact"}
+{"words": "whatsapp pe contact kaise jodte hain", "in_whatsapp": false, "guide": "whatsapp_add_contact"}
+{"words": "नंबर सेव करना है", "in_whatsapp": true, "guide": "whatsapp_add_contact"}
+{"words": "naye number pe whatsapp message bhejna hai", "in_whatsapp": false, "guide": "whatsapp_message_new_number"}
+{"words": "bina save kiye message kaise bheju", "in_whatsapp": true, "guide": "whatsapp_message_new_number"}
+{"words": "mujhe [number] pe WhatsApp karna hai", "in_whatsapp": false, "guide": null, "note": "masked number, no keyword: Gemini picks it (cases.jsonl wa-guide-04)"}
+{"words": "jo galti se likha usko sudharna hai WhatsApp pe", "in_whatsapp": false, "guide": null, "note": "missed by keywords: Gemini picks it (wa-guide-01)"}
+{"words": "WhatsApp pe kisi ka number kaise rakhte hain", "in_whatsapp": false, "guide": null, "note": "missed by keywords: Gemini picks it (wa-guide-02)"}
+{"words": "jis aadmi ka naam phone mein nahi hai usko WhatsApp karna hai", "in_whatsapp": false, "guide": null, "note": "missed by keywords: Gemini picks it (wa-guide-03)"}
+{"words": "message edit kaise karun", "in_whatsapp": false, "guide": null, "note": "not clearly WhatsApp, so not routed"}
+{"words": "doodh list mein daal do", "in_whatsapp": true, "guide": null, "note": "not a WhatsApp task"}
+{"words": "mera number kya hai", "in_whatsapp": true, "guide": null, "note": "no save word"}
+{"words": "WhatsApp pe video call kaise karun", "in_whatsapp": false, "guide": null, "note": "no guide for this"}
+{"words": "GPay mein bank account add karna hai", "in_whatsapp": false, "guide": null, "note": "add, but not WhatsApp"}

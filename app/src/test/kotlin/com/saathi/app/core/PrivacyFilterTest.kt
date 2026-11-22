@@ -130,8 +130,104 @@ class PrivacyFilterTest {
         listOf(
             "com.whatsapp", "com.google.android.apps.messaging", "com.truecaller", "com.google.android.gm",
             "com.android.systemui", "com.sbi.lotusintouch", "com.snapwork.hdfc", "com.csam.icici.bank.imobile",
+            Allowlist.GPAY, "com.phonepe.app", "net.one97.paytm", "com.cred.club", "com.sbi.SBIFreedomPlus",
+            "com.axis.mobile", "com.msf.kbank.mobile", "com.bankofbaroda.mconnect",
+            "com.infrasofttech.CentralBank", "com.fss.pnbpsp",
         ).forEach { assertFalse(it, Allowlist.isAllowed(it)) }
+        assertTrue(Allowlist.isStrictBankApp(Allowlist.GPAY))
+        assertTrue(Allowlist.isStrictBankApp("com.phonepe.app"))
+        assertTrue(Allowlist.isStrictBankApp("net.one97.paytm"))
         assertFalse(Allowlist.isAllowed(null))
+    }
+
+    @Test fun detectsFlipkartAndAmazonPaymentOptionsScreensWithoutFalsePositivesOnProducts() {
+        val flipkartPaymentOptions = listOf(
+            NodeFacts(text = "Step 3 of 3"),
+            NodeFacts(text = "Payments"),
+            NodeFacts(text = "Total Amount ₹549"),
+            NodeFacts(text = "UPI"),
+            NodeFacts(text = "Google Pay"),
+            NodeFacts(text = "PhonePe"),
+            NodeFacts(text = "Credit / Debit / ATM Card"),
+            NodeFacts(text = "Net Banking"),
+            NodeFacts(text = "Cash on Delivery"),
+        )
+        assertTrue(
+            "Should trigger on Flipkart Payment Options screen",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartPaymentOptions, "com.flipkart.android"),
+        )
+
+        val amazonCheckoutPayment = listOf(
+            NodeFacts(text = "Select a payment method"),
+            NodeFacts(text = "Continue"),
+            NodeFacts(text = "Pay with UPI"),
+            NodeFacts(text = "GPay"),
+            NodeFacts(text = "Paytm"),
+            NodeFacts(text = "Credit or debit card"),
+        )
+        assertTrue(
+            "Should trigger on Amazon Select a payment method screen",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(amazonCheckoutPayment, "in.amazon.mShop.android.shopping"),
+        )
+
+        val swiggyCheckout = listOf(
+            NodeFacts(text = "Payment Options"),
+            NodeFacts(text = "Pay using Google Pay"),
+            NodeFacts(text = "More UPI Options"),
+        )
+        assertTrue(
+            "Should trigger on Swiggy Payment Options screen",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(swiggyCheckout, "in.swiggy.android"),
+        )
+
+        val flipkartWebViewPaymentNoTitle = listOf(
+            NodeFacts(text = "UPI"),
+            NodeFacts(text = "Google Pay"),
+            NodeFacts(text = "Credit / Debit / ATM Card"),
+            NodeFacts(text = "Net Banking"),
+            NodeFacts(text = "Cash on Delivery"),
+        )
+        assertTrue(
+            "Should trigger on WebView payment list even if 'Payments' title node is absent",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartWebViewPaymentNoTitle, "com.flipkart.android"),
+        )
+
+        val flipkartProductDetail = listOf(
+            NodeFacts(text = "Women Cotton Kurta Set"),
+            NodeFacts(text = "₹499"),
+            NodeFacts(text = "Bank Offer: 5% Cashback on Flipkart Axis Bank Credit Card"),
+            NodeFacts(text = "UPI & Net Banking available"),
+            NodeFacts(text = "Easy Payment Options: Cash on Delivery"),
+            NodeFacts(text = "Add to cart", isClickable = true),
+            NodeFacts(text = "Buy Now", isClickable = true),
+        )
+        assertFalse(
+            "Should NOT false-trigger on a product detail page with Add to cart / Buy Now",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartProductDetail, "com.flipkart.android"),
+        )
+
+        val flipkartHomeScreen = listOf(
+            NodeFacts(text = "Search for products, brands and more"),
+            NodeFacts(text = "Fashion"),
+            NodeFacts(text = "Mobiles"),
+            NodeFacts(text = "Home"),
+            NodeFacts(text = "Categories"),
+            NodeFacts(text = "Account"),
+            NodeFacts(text = "Cart"),
+        )
+        assertFalse(
+            "Should NOT false-trigger on Flipkart home screen",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartHomeScreen, "com.flipkart.android"),
+        )
+
+        assertFalse(
+            "Should NOT trigger inside Play Store",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartPaymentOptions, "com.android.vending"),
+        )
+        assertFalse(
+            "Should NOT trigger inside Android Settings",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartPaymentOptions, Allowlist.SETTINGS),
+        )
     }
 
     @Test fun addsThePhonesOwnClockButNeverAssistantOrMessagingApps() {
@@ -153,10 +249,32 @@ class PrivacyFilterTest {
         }
     }
 
-    @Test fun androidAllowlistMatchesCodeAllowlist() {
+    @Test fun recognisesChatAppPaymentScreensByClassName() {
+        assertTrue(PrivacyFilter.isPaymentScreenClass("com.whatsapp.payments.ui.IndiaUpiSendPaymentActivity"))
+        assertTrue(PrivacyFilter.isPaymentScreenClass("com.whatsapp.payments.ui.PaymentsHomeActivity"))
+        assertFalse(PrivacyFilter.isPaymentScreenClass("com.whatsapp.Conversation"))
+        assertFalse(PrivacyFilter.isPaymentScreenClass(null))
+        assertTrue(PrivacyFilter.isPaymentScreen(listOf(NodeFacts(text = "Send payment"))))
+    }
+
+    @Test fun labelProbeSkipsChatAndMessageRowsButKeepsMenus() {
+        assertTrue(ProbeRules.skipsRows("androidx.recyclerview.widget.RecyclerView"))
+        assertTrue(ProbeRules.skipsRows("android.widget.ListView"))
+        assertFalse(ProbeRules.skipsRows("androidx.appcompat.widget.MenuPopupWindow\$MenuDropDownListView"))
+        assertTrue(ProbeRules.keep("android.widget.ImageButton", clickable = true, editable = false, insideLabelContainer = false))
+        assertTrue(ProbeRules.keep("android.widget.ImageView", clickable = true, editable = false, insideLabelContainer = false))
+        assertTrue(ProbeRules.keep("androidx.appcompat.view.menu.ListMenuItemView", clickable = true, editable = false, insideLabelContainer = false))
+        assertTrue(ProbeRules.keep("android.widget.TextView", clickable = false, editable = false, insideLabelContainer = true))
+        // Plain text, such as a chat's title, and pictures that are not buttons are never written.
+        assertFalse(ProbeRules.keep("android.widget.TextView", clickable = false, editable = false, insideLabelContainer = false))
+        assertFalse(ProbeRules.keep("android.widget.TextView", clickable = true, editable = false, insideLabelContainer = false))
+        assertFalse(ProbeRules.keep("android.widget.ImageView", clickable = false, editable = false, insideLabelContainer = false))
+        assertFalse(ProbeRules.keep("android.widget.LinearLayout", clickable = true, editable = false, insideLabelContainer = false))
+    }
+
+    @Test fun serviceConfigHasNoPackageFilterSoBlocklistHandlesAllApps() {
         val config = File("src/main/res/xml/accessibility_service_config.xml").readText()
-        val declared = Regex("android:packageNames=\"([^\"]+)\"").find(config)!!.groupValues[1].split(",").toSet()
-        assertEquals(Allowlist.ALL, declared)
+        assertFalse(config.contains("android:packageNames"))
     }
 
     @Test fun serviceConfigCannotPerformGestures() {
@@ -278,6 +396,10 @@ class PrivacyFilterTest {
         assertEquals(12, json.getJSONObject("goal").getInt("idle_s"))
         assertTrue(json.isNull("pending_question"))
         assertTrue(json.has("screen"))
+        state.screen = ScreenFacts("WhatsApp", null, changed = true, readable = true, mode = SessionState.MODE_CONTROLS_ONLY)
+        val screen = state.toJson(now = 13_000).getJSONObject("screen")
+        assertEquals("controls_only", screen.getString("mode"))
+        assertTrue(screen.isNull("title"))
         assertEquals("doodh", json.getJSONObject("last_action").getJSONArray("items").getString(0))
     }
 
@@ -286,5 +408,24 @@ class PrivacyFilterTest {
         assertNull(AiReply.parseDailyTime("25:00"))
         assertNull(AiReply.parseOnceTime("kal subah"))
         assertTrue(AiReply.parseOnceTime("2026-11-07 10:00") != null)
+    }
+
+    @Test
+    fun aCodeInAWhatsAppChatPreviewDoesNotHideSaathi() {
+        val preview = NodeFacts(text = "123456 is your verification code. Do not share it.", isClickable = true)
+        val chatList = listOf(NodeFacts(text = "Chats"), preview, NodeFacts(text = "ओटीपी 4321 है", isClickable = true))
+        assertNull(PrivacyFilter.secretReason(chatList, ignoreRowText = true))
+        // Outside chat apps the same text still hides Saathi, as before.
+        assertEquals("prompt_text", PrivacyFilter.secretReason(chatList))
+    }
+
+    @Test
+    fun whatsAppsOwnPinPromptStillHidesSaathi() {
+        val twoStep = listOf(NodeFacts(text = "Enter your 6-digit PIN"), NodeFacts(text = "Next", isClickable = true))
+        assertEquals("prompt_text", PrivacyFilter.secretReason(twoStep, ignoreRowText = true))
+        val pinBox = listOf(NodeFacts(hint = "Enter PIN", isEditable = true, isClickable = true))
+        assertEquals("labelled_field", PrivacyFilter.secretReason(pinBox, ignoreRowText = true))
+        val password = listOf(NodeFacts(isPassword = true, isEditable = true, isClickable = true))
+        assertEquals("password_field", PrivacyFilter.secretReason(password, ignoreRowText = true))
     }
 }

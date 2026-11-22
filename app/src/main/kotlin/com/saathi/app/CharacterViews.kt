@@ -214,7 +214,8 @@ class PointerView(context: Context) : View(context) {
         this.target = target?.let(::Rect)
         this.gesture = gesture
         gestureNav = usesGestureNavigation
-        visibility = if (target != null || gesture.startsWith("nav_")) VISIBLE else GONE
+        // A swipe with no target is a scroll of the whole list, shown in the middle of the screen.
+        visibility = if (target != null || gesture.startsWith("nav_") || gesture.startsWith("swipe_")) VISIBLE else GONE
         invalidate()
     }
 
@@ -248,6 +249,14 @@ class PointerView(context: Context) : View(context) {
                 "swipe_down" -> drawFinger(canvas, now, cx, cy, cx, cy + h * 0.3f)
                 "swipe_left" -> drawFinger(canvas, now, cx, cy, cx - w * 0.35f, cy)
                 "swipe_right" -> drawFinger(canvas, now, cx, cy, cx + w * 0.35f, cy)
+            }
+        }
+        if (rect == null) {
+            when (gesture) {
+                "swipe_up" -> drawFinger(canvas, now, w / 2, h * 0.7f, w / 2, h * 0.35f)
+                "swipe_down" -> drawFinger(canvas, now, w / 2, h * 0.35f, w / 2, h * 0.7f)
+                "swipe_left" -> drawFinger(canvas, now, w * 0.8f, h / 2, w * 0.25f, h / 2)
+                "swipe_right" -> drawFinger(canvas, now, w * 0.25f, h / 2, w * 0.8f, h / 2)
             }
         }
         when (gesture) {

@@ -10,6 +10,8 @@ data class Goal(
     val app: String? = null,
     val status: String = SessionState.ACTIVE,
     val step: Int = 0,
+    /** The prepared guide running for this goal, if any. Set by the app only. */
+    val guide: String? = null,
 )
 
 /** What Saathi last pointed at. The model writes the label and expected screen, the app the rest. */
@@ -20,8 +22,17 @@ data class LastStep(
     val retries: Int = 0,
 )
 
-/** Facts from the accessibility service. title is set only when the screen list is sent too. */
-data class ScreenFacts(val app: String, val title: String?, val changed: Boolean, val readable: Boolean)
+/**
+ * Facts from the accessibility service. title is set only when the screen list is sent too. mode
+ * tells the model what kind of screen list it can get: see [SessionState.MODE_FULL] and the rest.
+ */
+data class ScreenFacts(
+    val app: String,
+    val title: String?,
+    val changed: Boolean,
+    val readable: Boolean,
+    val mode: String = SessionState.MODE_FULL,
+)
 
 data class PendingQuestion(val question: String, val options: List<String> = emptyList())
 
@@ -65,6 +76,7 @@ class SessionState {
                 .put("app", it.app ?: JSONObject.NULL)
                 .put("status", it.status)
                 .put("step", it.step)
+                .put("guide", it.guide ?: JSONObject.NULL)
                 .put("idle_s", ((now - lastActivityAt) / 1000).coerceAtLeast(0))
         } ?: JSONObject.NULL)
         .put(
@@ -81,6 +93,7 @@ class SessionState {
                 .put("title", it.title ?: JSONObject.NULL)
                 .put("changed", it.changed)
                 .put("readable", it.readable)
+                .put("mode", it.mode)
         } ?: JSONObject.NULL)
         .put("pending_question", pendingQuestion?.let {
             JSONObject().put("question", it.question).put("options", JSONArray(it.options))
@@ -161,6 +174,17 @@ class SessionState {
         const val KIND_CHAT = "chat"
         val KINDS = setOf("guide", "list", "reminder", "alarm_teach", "sound", "bank_text_help", "chat")
         private val MODEL_STATUSES = setOf(ACTIVE, DONE, ABANDONED)
+
+        /** An allowed app: the masked screen list. */
+        const val MODE_FULL = "full"
+        /** An ask-first app she said Haan to: known buttons only, everything else is [hidden]. */
+        const val MODE_CONTROLS_ONLY = "controls_only"
+        /** An ask-first app she has not been asked about yet. The app asks her before reading it. */
+        const val MODE_ASK_FIRST = "ask_first"
+        /** An ask-first app she said Nahi to. Help by conversation only. */
+        const val MODE_NOT_SHARED = "not_shared"
+        /** An app Saathi never reads. */
+        const val MODE_BLOCKED = "blocked"
 
         /** Goals that point at the screen, so the screen list is sent with them. */
         val GUIDED_KINDS = setOf("guide", "alarm_teach", "sound")
