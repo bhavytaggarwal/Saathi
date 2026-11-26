@@ -156,9 +156,9 @@ object ControlsOnly {
     fun spokenPlace(box: Box, screenWidth: Int, screenHeight: Int): Pair<String, String> {
         val x = box.centerX * 100 / screenWidth.coerceAtLeast(1)
         val y = box.centerY * 100 / screenHeight.coerceAtLeast(1)
-        val (vertical, verticalHi) = if (y < 34) "upar" to "ऊपर" else if (y > 66) "neeche" to "नीचे" else "beech" to "बीच"
-        val side = if (x < 34) " left" else if (x > 66) " right" else ""
-        return "$vertical$side mein" to "$verticalHi$side में"
+        val vertical = if (y < 34) Place.TOP else if (y > 66) Place.BOTTOM else Place.MIDDLE
+        val side = if (x < 34) Place.LEFT else if (x > 66) Place.RIGHT else null
+        return Place(vertical, side).words()
     }
 
     /** Reads a screen of an ask-first app. PrivacyFilter must already have run on these nodes. */
@@ -229,5 +229,51 @@ object ControlsOnly {
             node.tappable -> "button"
             else -> "text"
         }
+    }
+}
+
+/**
+ * A place on the screen, said in the language in use: text for the bubble, speech for the voice.
+ * Hindi gives "neeche right mein" / "नीचे right में", English "at the bottom right", Kannada
+ * "ಕೆಳಗೆ ಬಲಭಾಗದಲ್ಲಿ".
+ */
+data class Place(
+    val vertical: String,
+    val side: String? = null,
+    /** Hindi only: a guide's usual place reads "upar", a place found on screen "upar mein". */
+    val bare: Boolean = false,
+) {
+    fun words(): Pair<String, String> = when (Lang.current) {
+        Language.ENGLISH -> {
+            val en = when {
+                vertical == MIDDLE && side == null -> "in the middle"
+                vertical == MIDDLE -> "on the ${side!!.lowercase()}"
+                else -> "at the ${vertical.lowercase()}" + (side?.let { " ${it.lowercase()}" } ?: "")
+            }
+            en to en
+        }
+        Language.KANNADA -> {
+            val v = when (vertical) { TOP -> "ಮೇಲೆ"; BOTTOM -> "ಕೆಳಗೆ"; else -> "ಮಧ್ಯದಲ್ಲಿ" }
+            val sideKn = when (side) { LEFT -> "ಎಡಭಾಗದಲ್ಲಿ"; RIGHT -> "ಬಲಭಾಗದಲ್ಲಿ"; else -> null }
+            val kn = when {
+                sideKn == null -> v
+                vertical == MIDDLE -> sideKn
+                else -> "$v $sideKn"
+            }
+            kn to kn
+        }
+        else -> {
+            val (v, vHi) = when (vertical) { TOP -> "upar" to "ऊपर"; BOTTOM -> "neeche" to "नीचे"; else -> "beech" to "बीच" }
+            val sideWord = side?.let { " ${it.lowercase()}" }.orEmpty()
+            if (bare && side == null) v to vHi else "$v$sideWord mein" to "$vHi$sideWord में"
+        }
+    }
+
+    companion object {
+        const val TOP = "Top"
+        const val MIDDLE = "Middle"
+        const val BOTTOM = "Bottom"
+        const val LEFT = "Left"
+        const val RIGHT = "Right"
     }
 }

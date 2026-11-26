@@ -43,8 +43,12 @@ object PrivacyFilter {
         "शून्य", "एक", "दो", "तीन", "चार", "पांच", "पाँच", "छह", "छः", "छे", "सात", "आठ", "नौ",
         // The Hindi recogniser often writes English number words in Devanagari.
         "जीरो", "ज़ीरो", "वन", "टू", "थ्री", "फोर", "फ़ोर", "फाइव", "फ़ाइव", "सिक्स", "सेवन", "एट", "नाइन",
+        // Kannada, in Kannada script and Roman, and English number words in Kannada script.
+        "ಸೊನ್ನೆ", "ಒಂದು", "ಎರಡು", "ಮೂರು", "ನಾಲ್ಕು", "ಐದು", "ಆರು", "ಏಳು", "ಎಂಟು", "ಒಂಬತ್ತು",
+        "sonne", "ondu", "eradu", "mooru", "naalku", "nalku", "aidu", "aaru", "elu", "entu", "ombattu",
+        "ಜೀರೋ", "ಒನ್", "ಟು", "ತ್ರೀ", "ಫೋರ್", "ಫೈವ್", "ಸಿಕ್ಸ್", "ಸೆವೆನ್", "ಎಯ್ಟ್", "ನೈನ್",
     )
-    private val SECRET_TALK = Regex("(?i)\\b(otp|pin|password|code|cvv)\\b|ओटीपी|पिन|पासवर्ड|कोड")
+    private val SECRET_TALK = Regex("(?i)\\b(otp|pin|password|code|cvv)\\b|ओटीपी|पिन|पासवर्ड|कोड|ಒಟಿಪಿ|ಓಟಿಪಿ|ಪಿನ್|ಪಾಸ್‌ವರ್ಡ್|ಪಾಸ್ವರ್ಡ್|ಕೋಡ್")
 
     data class SpeechResult(val text: String, val masked: Boolean, val warn: Boolean)
 
@@ -96,14 +100,14 @@ object PrivacyFilter {
 
     private val SECRET_FIELD = Regex(
         "(?i)\\b(pin|mpin|otp|passcode|password|passwd|pwd|cvv|cvc|aadhaar|aadhar|pan|passport)\\b|" +
-            "one time|पिन|ओटीपी|पासवर्ड|आधार"
+            "one time|पिन|ओटीपी|पासवर्ड|आधार|ಪಿನ್|ಒಟಿಪಿ|ಓಟಿಪಿ|ಪಾಸ್‌ವರ್ಡ್|ಆಧಾರ್"
     )
     private val SECRET_PROMPT = Regex(
         "(?i)\\b(enter|confirm|re-?enter|type|create|set up|provide)\\s+(your\\s+|the\\s+)?" +
             "(\\d[- ]digit\\s+)?(upi\\s+|new\\s+|current\\s+|card\\s+)?" +
             "(pin|mpin|otp|passcode|password|cvv|cvc|aadhaar|aadhar|pan|passport|code)\\b|" +
             "\\bupi\\s*pin\\b|\\bone[- ]time\\s+(password|code)\\b|\\bverification code\\b|\\bcvv\\b|" +
-            "पिन दर्ज|पिन डाल|ओटीपी|पासवर्ड दर्ज|आधार नंबर"
+            "पिन दर्ज|पिन डाल|ओटीपी|पासवर्ड दर्ज|आधार नंबर|ಪಿನ್ ನಮೂದಿಸಿ|ಪಿನ್ ಹಾಕಿ|ಒಟಿಪಿ|ಓಟಿಪಿ|ಪಾಸ್‌ವರ್ಡ್ ನಮೂದಿಸಿ|ಆಧಾರ್ ಸಂಖ್ಯೆ"
     )
 
     /** True when the screen is asking for a secret. Saathi must then hide and send nothing. */
@@ -256,7 +260,8 @@ object PrivacyFilter {
         "(?i)\\b(anydesk|teamviewer|rustdesk|quick ?support|airdroid)\\b|" +
             "\\b(collect request|wants to collect|requesting money|approve (this )?(request|payment))\\b|" +
             "\\brequesting\\s*(₹|rs\\b)|" +
-            "\\bshare (this |the |your )?(code|otp|pin)\\b|otp (maang|bata)|कोड (बता|शेयर)"
+            "\\bshare (this |the |your )?(code|otp|pin)\\b|otp (maang|bata)|कोड (बता|शेयर)|" +
+            "ಕೋಡ್ (ಹೇಳಿ|ಕೊಡಿ|ಶೇರ್)|ಒಟಿಪಿ (ಹೇಳಿ|ಕೊಡಿ|ಕೇಳ)|ಓಟಿಪಿ (ಹೇಳಿ|ಕೊಡಿ|ಕೇಳ)"
     )
 
     /** True when the screen or her words point at a known scam pattern. */

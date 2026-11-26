@@ -72,8 +72,11 @@ data class AiReply(
             val confidence = json.optDouble("confidence", 0.0).takeIf { !it.isNaN() }?.coerceIn(0.0, 1.0)
                 ?: return Parsed.Invalid("confidence must be a number from 0 to 1")
 
-            val text = json.optString("say_roman").trim()
-            val speech = json.optString("say_devanagari").trim().ifEmpty { text }
+            val roman = json.optString("say_roman").trim()
+            val speech = json.optString("say_devanagari").trim().ifEmpty { roman }
+            // Only Hindi has two scripts. In English or Kannada the bubble shows exactly what she
+            // hears, so a Roman or Hinglish say_roman can never put Hindi on her screen.
+            val text = if (Lang.current == Language.HINDI) roman else speech.ifEmpty { roman }
             if (intent in NEEDS_WORDS && text.isEmpty()) return Parsed.Invalid("say_roman is empty")
 
             val target = if (intent in POINTING_INTENTS && json.has("target_element") && !json.isNull("target_element")) {

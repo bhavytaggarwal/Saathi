@@ -110,7 +110,7 @@ class SaathiAccessibilityService : AccessibilityService() {
             val notification = Notification.Builder(this, REENABLE_CHANNEL_ID)
                 .setSmallIcon(R.mipmap.ic_launcher)
                 .setContentTitle(Lines.ENABLE_ACCESSIBILITY_BUTTON)
-                .setContentText("Payment ke baad yahan dabakar Saathi wapas chalu karein")
+                .setContentText(Lines.REENABLE_NOTIFICATION_TEXT)
                 .setContentIntent(pending)
                 .setOngoing(true)
                 .setAutoCancel(true)

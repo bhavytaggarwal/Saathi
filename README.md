@@ -129,6 +129,24 @@ What the backend enforces on every request:
   - Every `/v1/ask` turn generates a UUID4 `trace_id`, returns it to the app, and emits a structured `saathi_audit_trace` JSON event to Cloud Logging for replay.
   - Tapping **"Galat hai / Report"** on Saathi's overlay (or saying *"galat tha"*) sends `trace_id` and masked turn context to `POST /v1/report`, writing a review document to Firestore `flagged_outputs/{trace_id}` (`owner: "bhavyta"`, `status: "needs_review"`) and emitting a `WARNING` `saathi_output_flagged` event to Cloud Logging.
 
+## Languages
+
+Setup starts by asking her language: **हिन्दी, English or ಕನ್ನಡ**. Each is written in its own script, and the phone's own language is suggested first. Telugu, Tamil, Marathi, Bengali, Gujarati, Malayalam and Punjabi are listed as "coming soon" and can't be chosen. Saathi never speaks half-Hindi to someone who asked for another language. "🌐 Change language" on the setup screen brings the choice back.
+
+The choice (`core/Language.kt`, `Prefs.language`) sets all of these:
+- **Listening and the speech pack:** the recognizer, and the automatic pack download, use `hi-IN`, `en-IN` or `kn-IN`.
+- **The voice:** the speech engine voice for that language.
+- **Fixed lines and buttons:** every line in `core/Lines.kt`, the panel buttons, notifications and the setup steps.
+- **WhatsApp guides:** every step, and where a button is ("neeche right mein", "at the bottom right", "ಕೆಳಗೆ ಬಲಭಾಗದಲ್ಲಿ").
+- **The Accessibility setup line:** labels still follow the phone's Settings language.
+- **Words she says on the phone:** yes/no, stop, again, slower, wrong, "done", and the guide router.
+- **Privacy:** Kannada number words and digits (೦–೯) are masked, and OTP, PIN, password and code in Kannada trigger the warning.
+- **AI replies:** the prompt has a `Her language:` line and a LANGUAGE section in the system instruction.
+
+**Kannada is a draft.** It must be checked by a native speaker before wide use, above all the OTP, PIN and scam warnings. `LanguageTest` checks that every line exists in every ready language, in its own script, under 15 words, and never says "tap" or "click".
+
+To add a language: give it `ready = true` in `Language`, add its version to `Lang.pick` and every line in `Lines`, then its guide steps, places, words and privacy words. Add eval cases tagged `language`, get a native speaker to check it, then run the phone test.
+
 ## How it works
 
 1. She taps the face and asks out loud, or types.

@@ -1,5 +1,8 @@
 package com.saathi.app
 
+import com.saathi.app.core.Language
+import com.saathi.app.core.Lang
+import android.content.res.Resources
 import android.Manifest
 import android.app.Activity
 import android.app.AlarmManager
@@ -26,6 +29,7 @@ import android.widget.CheckBox
 import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.Spinner
+import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
 import com.saathi.app.core.Lines
@@ -136,6 +140,19 @@ class MainActivity : Activity() {
             }
         }
         root.addView(toggleAdvanced, wrapWithGap(10))
+        root.addView(TextView(this).apply {
+            text = Lines.Setup.CHANGE_LANGUAGE + " (" + prefs.language.nativeName + ")"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF0F5E5C.toInt())
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            setOnClickListener {
+                prefs.clearLanguageChoice()
+                updateOnboardingStep(autoSpeak = true)
+                // The language step is at the top of the page.
+                (stepperContainer.parent?.parent as? ScrollView)?.smoothScrollTo(0, 0)
+            }
+        }, wrapWithGap(4))
         root.addView(advancedContainer)
 
         buildAdvancedSettings(advancedContainer)
@@ -156,6 +173,8 @@ class MainActivity : Activity() {
             }
         }
         return when {
+            // The language comes first, so every step after it is in her language.
+            !prefs.languageChosen -> 0
             !hasMic -> 1
             // Do not nag the user on app launch if Accessibility was disabled after onboarding or
             // automatically stepped out for a strict banking app.
@@ -182,13 +201,14 @@ class MainActivity : Activity() {
         stepperContainer.removeAllViews()
 
         when (step) {
+            0 -> stepperContainer.addView(buildLanguageCard())
             1 -> stepperContainer.addView(
                 buildStepCard(
-                    stepNumber = "Step 1 of 3",
+                    stepNumber = Lines.Setup.step(1),
                     iconText = "🎙️",
-                    headline = "Bas boliye, main sunungi",
-                    spokenHindi = "बस बोलिए, मैं सुनूँगी। नीचे माइक अलाउ करें बटन दबाइए।",
-                    ctaLabel = "Mic allow karein",
+                    headline = Lines.Setup.MIC_HEADLINE,
+                    spokenHindi = Lines.Setup.MIC_SPEECH,
+                    ctaLabel = Lines.Setup.MIC_BUTTON,
                     onCtaClick = {
                         requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
                     },
@@ -196,11 +216,11 @@ class MainActivity : Activity() {
             )
             2 -> stepperContainer.addView(
                 buildStepCard(
-                    stepNumber = "Step 2 of 3",
+                    stepNumber = Lines.Setup.step(2),
                     iconText = "👆",
-                    headline = "Main aapko button dikhaungi",
-                    spokenHindi = "मैं आपको बटन दिखाऊँगी। नीचे साथी चालू करें बटन दबाइए।",
-                    ctaLabel = "Saathi chalu karein",
+                    headline = Lines.Setup.SCREEN_HEADLINE,
+                    spokenHindi = Lines.Setup.SCREEN_SPEECH,
+                    ctaLabel = Lines.ENABLE_ACCESSIBILITY_BUTTON,
                     onCtaClick = {
                         voice.speak(AccessibilitySetupGuide.spokenInstruction())
                         startActivity(AccessibilitySetupGuide.createSettingsIntent(this@MainActivity))
@@ -210,11 +230,11 @@ class MainActivity : Activity() {
             )
             else -> stepperContainer.addView(
                 buildStepCard(
-                    stepNumber = "Step 3 of 3",
+                    stepNumber = Lines.Setup.step(3),
                     iconText = "✨",
-                    headline = "Shuru karein! Poochiye: 'Shopping list padho'",
-                    spokenHindi = "शुरू करें! पूछिए: शॉपिंग लिस्ट पढ़ो।",
-                    ctaLabel = "Shuru karein",
+                    headline = Lines.Setup.START_HEADLINE,
+                    spokenHindi = Lines.Setup.START_SPEECH,
+                    ctaLabel = Lines.Setup.START_BUTTON,
                     onCtaClick = {
                         voice.stopSpeaking()
                         val assistant = SaathiAccessibilityService.instance?.assistant
@@ -234,14 +254,78 @@ class MainActivity : Activity() {
         if (autoSpeak && (stepChanged || lastSpokenStep != step)) {
             lastSpokenStep = step
             val speech = when (step) {
-                1 -> "बस बोलिए, मैं सुनूँगी। नीचे माइक अलाउ करें बटन दबाइए।"
-                2 -> "मैं आपको बटन दिखाऊँगी। नीचे साथी चालू करें बटन दबाइए।"
-                else -> "शुरू करें! पूछिए: शॉपिंग लिस्ट पढ़ो।"
+                0 -> Lines.Setup.CHOOSE_SPEECH
+                1 -> Lines.Setup.MIC_SPEECH
+                2 -> Lines.Setup.SCREEN_SPEECH
+                else -> Lines.Setup.START_SPEECH
             }
             stepperContainer.postDelayed({
                 if (!isDestroyed) voice.speak(speech)
             }, 350)
         }
+    }
+
+    /**
+     * The first step: her language. Each is written in its own script. The phone's language is
+     * suggested first, and Saathi says "choose your language" in it. Languages not ready yet are
+     * shown, greyed, so the family knows they are coming.
+     */
+    private fun buildLanguageCard(): View {
+        val suggested = Language.suggestedFor(Resources.getSystem().configuration.locales[0].language)
+        // Spoken in the suggested language until one is chosen. Nothing is saved yet.
+        Lang.current = suggested
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(22), dp(20), dp(22))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = 24f * resources.displayMetrics.density
+                setStroke(dp(2), 0xFFE8730C.toInt())
+            }
+        }
+        card.addView(TextView(this).apply {
+            text = "🌐  " + Lines.Setup.CHOOSE_TITLE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
+            setTextColor(0xFF1F1A14.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+        })
+        val ordered = listOf(suggested) + Language.entries.filter { it.ready && it != suggested } +
+            Language.entries.filter { !it.ready }
+        for (language in ordered) {
+            val button = Button(this, null, 0, 0).apply {
+                isAllCaps = false
+                textSize = 21f
+                minimumHeight = dp(58)
+                gravity = Gravity.CENTER
+                typeface = Typeface.DEFAULT_BOLD
+                if (language.ready) {
+                    text = language.nativeName
+                    setTextColor(if (language == suggested) Color.WHITE else 0xFF0F5E5C.toInt())
+                    background = GradientDrawable().apply {
+                        setColor(if (language == suggested) 0xFF0F5E5C.toInt() else 0xFFEAF4F3.toInt())
+                        cornerRadius = 28f * resources.displayMetrics.density
+                    }
+                    setOnClickListener {
+                        prefs.language = language
+                        voice.stopSpeaking()
+                        packButton.let { (it as? TextView)?.text = Lines.PACK_BUTTON }
+                        refreshers.forEach { refresh -> refresh() }
+                        updateOnboardingStep(autoSpeak = true)
+                    }
+                } else {
+                    text = "${language.nativeName}  ·  ${Lines.Setup.COMING_SOON}"
+                    setTextColor(0xFF9A9088.toInt())
+                    isEnabled = false
+                    background = GradientDrawable().apply {
+                        setColor(0xFFF3EFEA.toInt())
+                        cornerRadius = 28f * resources.displayMetrics.density
+                    }
+                }
+            }
+            card.addView(button, wrapWithGap(10))
+        }
+        return card
     }
 
     private fun buildStepCard(
@@ -276,7 +360,7 @@ class MainActivity : Activity() {
             typeface = Typeface.DEFAULT_BOLD
         }
         val replayBtn = TextView(this).apply {
-            text = "🔊 Dobara sunein"
+            text = Lines.Setup.REPLAY
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             setTextColor(0xFF0F5E5C.toInt())
             typeface = Typeface.DEFAULT_BOLD
@@ -581,9 +665,9 @@ class MainActivity : Activity() {
         card.addView(heading("Hearing her"))
         packStatus = body("")
         card.addView(packStatus)
-        packButton = primaryButton("Download Hindi speech pack (about 66 MB)") {
-            voice.downloadHindiPack { started ->
-                if (!started) {
+        packButton = primaryButton(Lines.PACK_BUTTON) {
+            voice.downloadHindiPack { result ->
+                if (result == VoiceIO.PackDownload.FAILED) {
                     Toast.makeText(this, "This phone could not start the download.", Toast.LENGTH_LONG).show()
                 }
                 packChecksLeft = PACK_CHECKS

@@ -141,7 +141,8 @@ def build_state(case, screen):
 
 
 def build_prompt(case, state, screen, looks=None):
-    out = ["CONTEXT", f"Current time: {NOW}", f"Phone navigation: {case.get('navigation', 'gestures')}", ""]
+    out = ["CONTEXT", f"Current time: {NOW}", f"Her language: {case.get('language', 'Hindi')}",
+           f"Phone navigation: {case.get('navigation', 'gestures')}", ""]
     out += ["STATE:", json.dumps(state, ensure_ascii=False, separators=(",", ":")), ""]
     out.append("HISTORY (oldest first):")
     history = case.get("history", [])
@@ -159,6 +160,12 @@ def build_prompt(case, state, screen, looks=None):
         text += f'HER WORDS: "{case["words"]}"\n'
     else:
         text += "HER WORDS: none. The screen has changed. Give the next single step, or goal_done if the goal is finished.\n"
+    # The same closing line as Assistant.replyLanguageLine.
+    language = case.get("language", "Hindi")
+    if language == "Kannada":
+        text += "REPLY LANGUAGE: Kannada. Write say_roman and say_devanagari in Kannada script, never Hindi.\n"
+    elif language != "Hindi":
+        text += f"REPLY LANGUAGE: {language}. Write say_roman and say_devanagari in {language}, never Hindi.\n"
     guide = case.get("guide")
     if guide:
         # The same line as Assistant.buildPrompt while a prepared guide is running.

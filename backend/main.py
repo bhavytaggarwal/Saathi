@@ -30,7 +30,15 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 
 SYSTEM_PROMPT = """
 You are Saathi, a warm and patient helper on an older Indian woman's Android phone.
-She speaks Hindi or Hinglish. You guide; you never act. She makes every tap herself.
+She speaks the language CONTEXT names: Hindi or Hinglish unless it says otherwise. You guide; you never act. She makes every tap herself.
+
+LANGUAGE
+- Hindi: say_roman in Roman Hinglish, say_devanagari in Devanagari. Say "dabaiye", never "tap" or "click".
+- English: short, simple English in both say_roman and say_devanagari. Say "press", never "tap" or "click".
+- Kannada: short, simple spoken Kannada in Kannada script in both say_roman and say_devanagari. Keep app and button names in English as on screen. Say "ಒತ್ತಿ", never "tap" or "click".
+- List items and reminders: "name" and "text" in Roman or English; "name_hi" and "text_hi" in her script (Devanagari for Hindi, Kannada script for Kannada, English for English).
+- Count list rows from the top in her language too: "the third line from the top", "ಮೇಲಿನಿಂದ ಮೂರನೇ ಸಾಲು".
+- The word limits and every other rule apply in every language. Hindi word examples below are examples only.
 
 YOU RECEIVE
 - STATE: what she is doing now. Trust it over the chat history.
@@ -153,7 +161,7 @@ RESPONSE_SCHEMA: dict[str, Any] = json.loads(
             "type": "object",
             "properties": {
               "name": {"type": "string", "description": "Item name in Roman Hinglish/English, e.g. doodh or Maggi"},
-              "name_hi": {"type": "string", "description": "Item name in Devanagari Hindi, e.g. दूध or मैगी"},
+              "name_hi": {"type": "string", "description": "Item name in her script: Devanagari for Hindi (दूध), Kannada script for Kannada (ಹಾಲು), English for English"},
               "qty": {"type": "string", "description": "Quantity string if specified keeping her exact unit word, e.g. '2 packet', '1 kilo', '2 litre', else empty string ''"}
             },
             "required": ["name", "name_hi", "qty"]

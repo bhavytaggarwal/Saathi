@@ -30,6 +30,8 @@ import com.saathi.app.core.Guides
 import com.saathi.app.core.Goal
 import com.saathi.app.core.LastAction
 import com.saathi.app.core.LastStep
+import com.saathi.app.core.Lang
+import com.saathi.app.core.Language
 import com.saathi.app.core.Line
 import com.saathi.app.core.Lines
 import com.saathi.app.core.ListenPolicy
@@ -127,6 +129,10 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     // When she last spoke, so her words come before the guide moving on by itself.
     private var lastHeardAt = 0L
 
+    // When Saathi last asked the phone to fetch the Hindi pack, and whether it is waiting for Wi-Fi.
+    private var packRequestedAt = 0L
+    private var packScheduled = false
+
     // Limits automatic follow-up calls, so an odd reply cannot loop and spend money.
     private var followUps = 0
 
@@ -222,7 +228,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         refresh()
         if (power.isInteractive) main.post(tick)
         if (announceConnected) {
-            voice.speak(Lines.ACCESSIBILITY_CONNECTED_SPEECH)
+            voice.speak(Lines.ACCESSIBILITY_CONNECTED.speech)
         }
         // Covers a service restart: anything due while it was away fires now.
         reminders.restoreAll()
@@ -534,7 +540,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
             // keep the floating avatar and panel alive in an active ready/listening state.
             touchIdle()
             overlay.setCompact(false)
-            overlay.setMessage("Boliye, main sun rahi hoon.")
+            overlay.setMessage(Lines.TALK_NOW)
         }
         refresh()
     }
@@ -733,10 +739,11 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
 
     private fun startSession() {
         sessionActive = true
+        overlay.applyLanguage()
         expireIfStale(now())
         overlay.setSessionBadge(true)
         overlay.setHeard(null)
-        overlay.setMessage("Boliye, main sun rahi hoon.")
+        overlay.setMessage(Lines.TALK_NOW)
         overlay.showReminderButtons(shownReminder != null)
         overlay.showEvalButton(true)
         overlay.setKeepScreenOn(true)
@@ -893,7 +900,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
 
     override fun onReady() {
         overlay.setMood(Mood.LISTENING)
-        overlay.setMessage(if (followUpOpen) "Aur kuch? Boliye, sun rahi hoon." else "Boliye, sun rahi hoon.")
+        overlay.setMessage(if (followUpOpen) Lines.LISTENING_FOLLOW_UP else Lines.LISTENING)
     }
 
     override fun onPartial(text: String) {
@@ -927,15 +934,49 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     private fun closedQuietly(): Boolean {
         if (!followUpOpen) return false
         followUpOpen = false
-        overlay.setMessage("Kuch aur ho to mujhe dabaiye.")
+        overlay.setMessage(Lines.TAP_IF_MORE)
         scheduleAutoClose()
         return true
     }
 
     override fun onHindiPackMissing() {
         overlay.setMood(Mood.RESTING)
-        if (closedQuietly()) return
-        say(Lines.PACK_MISSING)
+        // The download starts even after a silent follow-up, so the pack is there next time.
+        val quiet = closedQuietly()
+        fetchHindiPack(speak = !quiet)
+    }
+
+    /**
+     * Asks the phone to fetch the Hindi pack by itself, at most once every few minutes, so tapping
+     * Bolo again does not restart it. She hears what is happening, and is told when it is ready.
+     */
+    private fun fetchHindiPack(speak: Boolean) {
+        val since = SystemClock.uptimeMillis() - packRequestedAt
+        if (packRequestedAt != 0L && since < PACK_RETRY_MS) {
+            if (speak) say(if (packScheduled) Lines.PACK_SCHEDULED else Lines.PACK_DOWNLOADING)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            if (speak) say(Lines.PACK_MISSING)
+            return
+        }
+        packRequestedAt = SystemClock.uptimeMillis()
+        packScheduled = false
+        if (speak) say(Lines.PACK_DOWNLOADING)
+        voice.downloadHindiPack { result ->
+            when (result) {
+                VoiceIO.PackDownload.READY -> if (sessionActive && !voice.isListening) say(Lines.PACK_READY)
+                VoiceIO.PackDownload.SCHEDULED -> {
+                    packScheduled = true
+                    if (sessionActive && !voice.isListening) say(Lines.PACK_SCHEDULED)
+                }
+                VoiceIO.PackDownload.STARTED -> Unit
+                VoiceIO.PackDownload.FAILED -> {
+                    packRequestedAt = 0L
+                    if (sessionActive && !voice.isListening) say(Lines.PACK_MISSING)
+                }
+            }
+        }
     }
 
     private fun say(line: Line, rate: Float = prefs.speechRate, then: (() -> Unit)? = null) {
@@ -1448,7 +1489,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         main.removeCallbacks(waitingLine)
         main.removeCallbacks(autoClose)
         overlay.clearPointer()
-        overlay.setMessage("Dekh rahi hoon...")
+        overlay.setMessage(Lines.LOOKING)
         overlay.setMood(Mood.THINKING)
         return generation
     }
@@ -1471,6 +1512,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         appendLine("CONTEXT")
         appendLine("Current time: " + SimpleDateFormat("EEEE yyyy-MM-dd HH:mm", Locale.ENGLISH).format(Date()))
         currentPkg?.takeIf { it.isNotBlank() }?.let { appendLine("Active package: $it") }
+        appendLine("Her language: ${Lang.current.englishName}")
         if (prefs.herName.isNotBlank()) appendLine("Her name: ${prefs.herName}")
         if (prefs.sonName.isNotBlank()) appendLine("Her son's name: ${prefs.sonName}")
         val learned = prefs.learnedTasks().entries.sortedByDescending { it.value }.take(8)
@@ -1500,6 +1542,8 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         } else {
             appendLine("HER WORDS: none. The screen has changed. Give the next single step, or goal_done if the goal is finished.")
         }
+        // Said last as well as in CONTEXT, because a fast model can drift back to Hindi.
+        replyLanguageLine()?.let(::appendLine)
         guide?.let { runner ->
             val last = runner.step?.let { " Its last step was \"${it.line(null).text}\", expecting the screen \"${it.next.id}\"." }.orEmpty()
             appendLine("GUIDE: the app is running the prepared guide \"${runner.guide.id}\".$last If the screen does not fit that, help her with one step to get there. Leave guide as \"none\".")
@@ -1556,7 +1600,18 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     }
 
     /** Checks the reply against the screen that was sent. Null means it is fine. */
+    /** The closing reminder of her language, for every language but Hindi. */
+    private fun replyLanguageLine(): String? = when (Lang.current) {
+        Language.HINDI -> null
+        Language.KANNADA -> "REPLY LANGUAGE: Kannada. Write say_roman and say_devanagari in Kannada script, never Hindi."
+        else -> "REPLY LANGUAGE: ${Lang.current.englishName}. Write say_roman and say_devanagari in ${Lang.current.englishName}, never Hindi."
+    }
+
     private fun problemWith(reply: AiReply, snapshot: ScreenSnapshot?): String? {
+        // A reply in Hindi script for someone who chose another language is sent back once.
+        if (Lang.current != Language.HINDI && (reply.line.text + reply.line.speech).any { it in '\u0900'..'\u097F' }) {
+            return "the reply is in Hindi, but she speaks ${Lang.current.englishName}. Reply in ${Lang.current.englishName}"
+        }
         if (reply.intent != "guide_step" && reply.intent != "alarm_teach") return null
         // Without a screen there is nothing to point at, and the screen is sent next.
         if (snapshot == null) return null
@@ -2053,7 +2108,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     private fun listReminders() {
         val all = reminders.all().filter { !it.fired }
         val line = if (all.isEmpty()) {
-            Line("Abhi koi reminder nahi laga hai.", "अभी कोई reminder नहीं लगा है।")
+            Lines.REMINDERS_NONE
         } else {
             Line(
                 "Ye reminder lage hain: " + all.joinToString(", ") { it.title },
@@ -2180,6 +2235,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         const val SETTLE_MS = 750L
         const val LOADING_DEFER_MS = 500L
         const val LLM_TIMEOUT_MS = 6000L
+        const val PACK_RETRY_MS = 10 * 60_000L
         const val SUBGOAL_HANDOFF_MS = 90_000L
         const val MIN_CALL_GAP_MS = 1500L
         const val WAITING_MS = 30_000L
@@ -2203,33 +2259,40 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         val CONSENT_YES = setOf(
             "haan", "han", "haa", "ha", "haanji", "hanji", "ji", "yes", "ok", "okay", "theek", "thik", "dekho", "dekhlo",
             "हाँ", "हां", "हा", "हांजी", "जी", "ठीक", "देखो", "ओके",
+            // English and Kannada.
+            "sure", "ಹೌದು", "ಹೂಂ", "ಸರಿ", "ನೋಡಿ", "ಓಕೆ", "houdu", "haudu", "sari",
         )
-        val CONSENT_NO = setOf("nahi", "nahin", "nai", "na", "naa", "mat", "no", "नहीं", "नही", "ना", "मत")
+        val CONSENT_NO = setOf(
+            "nahi", "nahin", "nai", "na", "naa", "mat", "no", "नहीं", "नही", "ना", "मत",
+            "don't", "dont", "ಬೇಡ", "ಇಲ್ಲ", "beda", "illa",
+        )
 
-        val REPEAT = Regex("phir se|fir se|dobara|repeat|फिर से|दोबारा")
-        val SLOWER = Regex("dheere|dheme|slow|धीरे")
-        val FASTER = Regex("\\btez\\b|\\bfast\\b|तेज़|तेज")
-        val STOP = Regex("bas|ruko|ruk jao|stop|chup|rehne do|band karo|बस|रुको|रुक जाओ|चुप|रहने दो|बंद करो")
+        val REPEAT = Regex("phir se|fir se|dobara|repeat|again|फिर से|दोबारा|ಮತ್ತೆ ಹೇಳಿ|ಇನ್ನೊಮ್ಮೆ|ಮತ್ತೊಮ್ಮೆ")
+        val SLOWER = Regex("dheere|dheme|slow|धीरे|ನಿಧಾನ")
+        val FASTER = Regex("\\btez\\b|\\bfast\\b|\\bfaster\\b|तेज़|तेज|ವೇಗವಾಗಿ|ಬೇಗ ಮಾತನಾಡ")
+        val STOP = Regex("bas|ruko|ruk jao|stop|chup|rehne do|band karo|that's all|enough|बस|रुको|रुक जाओ|चुप|रहने दो|बंद करो|ಸಾಕು|ನಿಲ್ಲಿಸಿ|ನಿಲ್ಲು|ಬೇಡ")
         const val TAG = "SaathiPrivacy"
         val SECURE_SCREEN = Regex("(?i)credential|confirmlock|biometric|npci|pinactivity")
         val ALARM = Regex("(?i)alarm|अलार्म")
         val REMINDER_WORDS = Regex("(?i)yaad|remind|याद|रिमाइंडर")
-        val WRONG = Regex("galat lag|ye galat|yeh galat|galat tha|wrong|गलत|ग़लत")
+        val WRONG = Regex("galat lag|ye galat|yeh galat|galat tha|wrong|गलत|ग़लत|ತಪ್ಪು")
         val USER_REPROMPT_REGEX = Regex(
             "(?i)\\b(kahan|kaha|kidhar|kaunsa|kon\\s*sa|nahi\\s+dikh|nahi\\s+mil|samajh\\s+nahi|kuch\\s+nahi\\s+hua|phir\\s+se\\s+batao)\\b|" +
-                "कहाँ|किधर|कौन\\s*सा|नहीं\\s+दिख|नहीं\\s+मिल|समझ\\s+नहीं"
+                "कहाँ|किधर|कौन\\s*सा|नहीं\\s+दिख|नहीं\\s+मिल|समझ\\s+नहीं|" +
+                "(?i)\\b(where|can't find|cannot find|don't see|didn't work)\\b|ಎಲ್ಲಿ|ಕಾಣುತ್ತಿಲ್ಲ|ಸಿಗುತ್ತಿಲ್ಲ|ಅರ್ಥವಾಗಲಿಲ್ಲ"
         )
 
         // Tier 1 local DOM matching triggers and filler words.
         val LOCAL_UI_INTENT = Regex(
             "(?i)\\b(where\\s+is|find|click|tap|open|kahan\\s+hai|kaha\\s+hai|dhundo|dabao|dabaun|kholo)\\b|" +
-                "कहाँ\\s+है|कहा\\s+है|ढूंढो|दबाओ|खोलो"
+                "कहाँ\\s+है|कहा\\s+है|ढूंढो|दबाओ|खोलो|ಎಲ್ಲಿದೆ|ಹುಡುಕಿ|ಒತ್ತಬೇಕು|ತೆರೆಯಿರಿ"
         )
         val LOCAL_UI_STOPWORDS = setOf(
             "where", "is", "the", "a", "an", "find", "click", "tap", "on", "open", "button", "icon", "option",
             "kahan", "kaha", "hai", "hain", "ko", "pe", "par", "mein", "me", "wala", "wali", "dhundo",
             "dabao", "dabaun", "kholo", "kholna", "please", "zara", "mujhe", "dikhao",
             "कहाँ", "कहा", "है", "को", "पे", "पर", "वाला", "वाली", "ढूंढो", "दबाओ", "खोलो",
+            "ಎಲ್ಲಿದೆ", "ಎಲ್ಲಿ", "ಹುಡುಕಿ", "ಒತ್ತಬೇಕು", "ತೆರೆಯಿರಿ", "ಬಟನ್", "ನನಗೆ", "ತೋರಿಸಿ",
         )
     }
 }

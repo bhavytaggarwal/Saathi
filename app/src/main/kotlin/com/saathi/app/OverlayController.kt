@@ -39,6 +39,16 @@ import kotlin.math.abs
  * features and the 1-tap re-enable card work seamlessly.
  */
 class OverlayController(private val context: Context, private val prefs: Prefs, private val cb: Callbacks) {
+    // Buttons and labels with words, so a language chosen later is shown without a restart.
+    private val labelled = ArrayList<Pair<TextView, () -> String>>()
+
+    private fun <T : TextView> T.label(words: () -> String): T = apply { labelled += this to words }
+
+    /** Shows every button in the language in use. Called on attach and when a session starts. */
+    fun applyLanguage() {
+        labelled.forEach { (view, words) -> view.text = words() }
+    }
+
     interface Callbacks {
         fun onBubbleTap()
         fun onStopTapped()
@@ -140,31 +150,31 @@ class OverlayController(private val context: Context, private val prefs: Prefs, 
         gravity = Gravity.CENTER_VERTICAL
         visibility = View.GONE
         addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        addView(pillButton("Bhejo", 0xFF0F5E5C.toInt()) { submitTyped() })
+        addView(pillButton(Lines.BUTTON_SEND, 0xFF0F5E5C.toInt()) { submitTyped() }.label { Lines.BUTTON_SEND })
     }
     private val actionRow = LinearLayout(ui).apply {
         orientation = LinearLayout.HORIZONTAL
-        addView(pillButton("Bolo", 0xFF0F5E5C.toInt()) { cb.onListenTapped() }, rowWeight())
-        addView(pillButton("Likho", 0xFF5C6B73.toInt()) { showInput() }, rowWeight())
-        addView(pillButton("Phir se", 0xFF5C6B73.toInt()) { cb.onRepeatTapped() }, rowWeight())
+        addView(pillButton(Lines.BUTTON_SPEAK, 0xFF0F5E5C.toInt()) { cb.onListenTapped() }.label { Lines.BUTTON_SPEAK }, rowWeight())
+        addView(pillButton(Lines.BUTTON_WRITE, 0xFF5C6B73.toInt()) { showInput() }.label { Lines.BUTTON_WRITE }, rowWeight())
+        addView(pillButton(Lines.BUTTON_REPEAT, 0xFF5C6B73.toInt()) { cb.onRepeatTapped() }.label { Lines.BUTTON_REPEAT }, rowWeight())
         addView(
-            pillButton("✕", 0xFF8A7F73.toInt()) { cb.onStopTapped() }.apply { contentDescription = "Band karo" },
+            pillButton("✕", 0xFF8A7F73.toInt()) { cb.onStopTapped() }.apply { contentDescription = Lines.BUTTON_CLOSE },
             LinearLayout.LayoutParams(dp(46), dp(BUTTON_DP)).apply { setMargins(dp(3), 0, 0, 0) },
         )
     }
     private val reminderRow = LinearLayout(ui).apply {
         orientation = LinearLayout.HORIZONTAL
         visibility = View.GONE
-        addView(pillButton("Ho gaya", 0xFF23A455.toInt()) { cb.onReminderDone() }, rowWeight())
-        addView(pillButton("10 minute baad", 0xFFE8730C.toInt()) { cb.onReminderSnooze() }, rowWeight())
+        addView(pillButton(Lines.BUTTON_DONE, 0xFF23A455.toInt()) { cb.onReminderDone() }.label { Lines.BUTTON_DONE }, rowWeight())
+        addView(pillButton(Lines.BUTTON_SNOOZE, 0xFFE8730C.toInt()) { cb.onReminderSnooze() }.label { Lines.BUTTON_SNOOZE }, rowWeight())
     }
 
     // Asked before an ask-first app is read.
     private val consentRow = LinearLayout(ui).apply {
         orientation = LinearLayout.HORIZONTAL
         visibility = View.GONE
-        addView(pillButton("Haan", 0xFF23A455.toInt()) { cb.onConsentAnswered(true) }, rowWeight())
-        addView(pillButton("Nahi", 0xFF5C6B73.toInt()) { cb.onConsentAnswered(false) }, rowWeight())
+        addView(pillButton(Lines.BUTTON_YES, 0xFF23A455.toInt()) { cb.onConsentAnswered(true) }.label { Lines.BUTTON_YES }, rowWeight())
+        addView(pillButton(Lines.BUTTON_NO, 0xFF5C6B73.toInt()) { cb.onConsentAnswered(false) }.label { Lines.BUTTON_NO }, rowWeight())
     }
 
     // 1-tap Re-Enable card shown only when a turn requires live screen guidance and Accessibility is off.
@@ -180,6 +190,7 @@ class OverlayController(private val context: Context, private val prefs: Prefs, 
         }
         val titleView = TextView(ui).apply {
             text = Lines.ENABLE_ACCESSIBILITY_TITLE
+            label { Lines.ENABLE_ACCESSIBILITY_TITLE }
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 21f)
             setTextColor(0xFF1F1A14.toInt())
             typeface = Typeface.DEFAULT_BOLD
@@ -187,6 +198,7 @@ class OverlayController(private val context: Context, private val prefs: Prefs, 
         }
         val enableBtn = Button(ui, null, 0, 0).apply {
             text = Lines.ENABLE_ACCESSIBILITY_BUTTON
+            label { Lines.ENABLE_ACCESSIBILITY_BUTTON }
             isAllCaps = false
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
@@ -224,7 +236,7 @@ class OverlayController(private val context: Context, private val prefs: Prefs, 
         gravity = Gravity.END
         visibility = View.VISIBLE
         addView(
-            pillButton("Galat hai / Report", 0xFF8A7F73.toInt()) { cb.onWrongTapped() },
+            pillButton(Lines.BUTTON_WRONG, 0xFF8A7F73.toInt()) { cb.onWrongTapped() }.label { Lines.BUTTON_WRONG },
             LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(36)),
         )
     }
@@ -355,6 +367,7 @@ class OverlayController(private val context: Context, private val prefs: Prefs, 
     // Lifecycle
 
     fun attach() {
+        applyLanguage()
         if (attached || context !is AccessibilityService) return
         attached = true
         // The order sets the stacking: spotlight lowest, then the face, then the panel.
@@ -373,6 +386,7 @@ class OverlayController(private val context: Context, private val prefs: Prefs, 
 
     /** Mounts the assistant panel inside an Activity container when Accessibility is disabled. */
     fun attachInApp(container: ViewGroup) {
+        applyLanguage()
         if (attached) return
         (panel.parent as? ViewGroup)?.removeView(panel)
         container.addView(
@@ -739,7 +753,7 @@ class OverlayController(private val context: Context, private val prefs: Prefs, 
 
     private fun addDismissHint(): TextView {
         val view = TextView(ui).apply {
-            text = "Yahan chhodo, chhup jaungi"
+            text = Lines.PARK_HERE
             setTextColor(Color.WHITE)
             setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
             gravity = Gravity.CENTER

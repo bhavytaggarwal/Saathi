@@ -2,12 +2,19 @@ package com.saathi.app
 
 import android.content.Context
 import android.provider.Settings
+import com.saathi.app.core.Lang
+import com.saathi.app.core.Language
 import org.json.JSONObject
 import java.security.MessageDigest
 
 /** Local settings and memory. */
 class Prefs(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("saathi", Context.MODE_PRIVATE)
+
+    init {
+        // Every part of the app makes its own Prefs, so this keeps them all on one language.
+        language
+    }
 
     /** Anonymous SHA-256 hash of ANDROID_ID for Cloud Run per-device quota checks. */
     val deviceId: String = run {
@@ -22,6 +29,23 @@ class Prefs(context: Context) {
     var model: String
         get() = prefs.getString("model", null)?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
         set(value) = prefs.edit().putString("model", value.trim()).apply()
+
+    /** Saathi's language. Chosen first in setup. Reading it also makes it the one in use. */
+    var language: Language
+        get() = Language.fromCode(prefs.getString("language", null)).also { Lang.current = it }
+        set(value) {
+            prefs.edit().putString("language", value.code).putBoolean("language_chosen", true).apply()
+            Lang.current = value
+        }
+
+    /** Shows the language step again, from "Change language" in setup. */
+    fun clearLanguageChoice() {
+        prefs.edit().putBoolean("language_chosen", false).apply()
+    }
+
+    /** False until she or her family has picked a language, which is the first setup step. */
+    val languageChosen: Boolean
+        get() = prefs.getBoolean("language_chosen", false)
 
     var herName: String
         get() = prefs.getString("her_name", "").orEmpty()

@@ -1,5 +1,6 @@
 package com.saathi.app
 
+import com.saathi.app.core.Lines
 import android.Manifest
 import android.app.AlarmManager
 import android.app.Notification
@@ -197,7 +198,7 @@ class ReminderScheduler(context: Context) {
         )
         val notification = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Saathi: yaad dila rahi hoon")
+            .setContentTitle(Lines.REMINDER_NOTIFICATION_TITLE)
             .setContentText(reminder.title)
             .setCategory(Notification.CATEGORY_REMINDER)
             .setAutoCancel(true)

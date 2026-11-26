@@ -22,6 +22,8 @@ import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import android.os.SystemClock
 import android.util.Log
+import com.saathi.app.core.Lang
+import com.saathi.app.core.Language
 import com.saathi.app.core.ListenPolicy
 import java.util.Locale
 import java.util.UUID
@@ -42,7 +44,10 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
 
     private val appContext = context.applicationContext
     private val main = Handler(Looper.getMainLooper())
-    private val hindi = Locale.forLanguageTag("hi-IN")
+    // The language in use: Hindi unless another was chosen in setup.
+    private val language: Language get() = Lang.current
+    private val hindi: Locale get() = language.locale
+    private var ttsLanguage: Language? = null
     // Media volume, not the separate assistant volume, which can sit near zero and which the
     // volume buttons she knows do not normally change.
     private val speechAttributes = AudioAttributes.Builder()
@@ -112,6 +117,7 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
 
     private fun configureTts() {
         val engine = tts ?: return
+        ttsLanguage = language
         engine.language = hindi
         engine.setAudioAttributes(speechAttributes)
         pickVoice()?.let { engine.voice = it }
@@ -164,11 +170,11 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         onSpeakingChanged?.invoke(false)
     }
 
-    /** Hindi voices installed on this phone, downloaded voices first. */
+    /** Voices for her language installed on this phone, downloaded voices first. */
     fun hindiVoices(): List<Voice> {
         val voices = runCatching { tts?.voices }.getOrNull().orEmpty()
         return voices
-            .filter { it.locale.language == "hi" && !it.features.contains("notInstalled") }
+            .filter { it.locale.language == language.code && !it.features.contains("notInstalled") }
             .sortedWith(compareBy({ it.isNetworkConnectionRequired }, { it.name }))
     }
 
@@ -183,7 +189,7 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         prefs.voiceName?.let { saved -> voices.firstOrNull { it.name == saved }?.let { return it } }
         // Prefer a voice that declares itself female, then Google's offline "hia" voice, then any.
         return voices.firstOrNull { "female" in it.name.lowercase() || it.features.contains("female") }
-            ?: voices.firstOrNull { "hia" in it.name && !it.isNetworkConnectionRequired }
+            ?: voices.firstOrNull { !it.isNetworkConnectionRequired && it.locale.country == "IN" }
             ?: voices.firstOrNull()
     }
 
@@ -215,6 +221,8 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
             onDone?.let { main.post(it) }
             return
         }
+        // The language was changed in setup since the engine was set up.
+        if (ttsLanguage != language) configureTts()
         val id = UUID.randomUUID().toString()
         // QUEUE_FLUSH replaces the line being said, and its callback goes with it.
         cancelPendingCallbacks()
@@ -310,8 +318,8 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
 
     private fun recognizerIntent() = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
         putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE, "hi-IN")
-        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, "hi-IN")
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE, language.tag)
+        putExtra(RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE, language.tag)
         putExtra(RecognizerIntent.EXTRA_PARTIAL_RESULTS, true)
         putExtra(RecognizerIntent.EXTRA_PREFER_OFFLINE, !prefs.allowOnlineSpeech)
         // Older speakers pause more while thinking, so natural pauses do not prematurely end recognition.
@@ -455,7 +463,7 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
             appContext.mainExecutor,
             object : RecognitionSupportCallback {
                 override fun onSupportResult(support: RecognitionSupport) {
-                    fun List<String>.hasHindi() = any { it.lowercase().startsWith("hi") }
+                    fun List<String>.hasHindi() = any { it.lowercase().startsWith(language.code) }
                     finish(
                         when {
                             support.installedOnDeviceLanguages.hasHindi() -> HindiPack.INSTALLED
@@ -473,40 +481,55 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         )
     }
 
-    /** Asks the phone to fetch the on-device Hindi pack. Only setup calls this. */
-    fun downloadHindiPack(onFinished: ((Boolean) -> Unit)? = null) {
+    /** What became of a request to fetch the Hindi pack. */
+    enum class PackDownload { READY, SCHEDULED, STARTED, FAILED }
+
+    /**
+     * Asks the phone to fetch the on-device Hindi pack. Setup calls this from its button, and the
+     * assistant calls it by itself when she taps Bolo and the pack is missing. Android decides when
+     * it downloads, so on mobile data it may wait for Wi-Fi (SCHEDULED). On Android 13 the phone
+     * does not report back, so STARTED is all that is known. Before Android 13 it always fails.
+     */
+    fun downloadHindiPack(onFinished: ((PackDownload) -> Unit)? = null) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || !isOnDeviceAvailable) {
-            onFinished?.invoke(false)
+            onFinished?.invoke(PackDownload.FAILED)
             return
         }
         val downloader = createOnDevice()
-        val finish = { ok: Boolean ->
+        var done = false
+        val finish = { result: PackDownload ->
             main.post {
-                downloader.destroy()
-                onFinished?.invoke(ok)
+                if (!done) {
+                    done = true
+                    downloader.destroy()
+                    Log.i(TAG, "hindi pack download: $result")
+                    onFinished?.invoke(result)
+                }
             }
             Unit
         }
-        if (Build.VERSION.SDK_INT >= 34) {
-            downloader.triggerModelDownload(
-                recognizerIntent(),
-                appContext.mainExecutor,
-                object : ModelDownloadListener {
-                    override fun onProgress(completedPercent: Int) = Unit
-                    override fun onSuccess() {
-                        finish(true)
-                    }
-                    override fun onScheduled() {
-                        finish(true)
-                    }
-                    override fun onError(error: Int) {
-                        finish(false)
-                    }
-                },
-            )
-        } else {
-            downloader.triggerModelDownload(recognizerIntent())
-            finish(true)
+        runCatching {
+            if (Build.VERSION.SDK_INT >= 34) {
+                downloader.triggerModelDownload(
+                    recognizerIntent(),
+                    appContext.mainExecutor,
+                    object : ModelDownloadListener {
+                        override fun onProgress(completedPercent: Int) = Unit
+                        override fun onSuccess() = finish(PackDownload.READY)
+                        override fun onScheduled() = finish(PackDownload.SCHEDULED)
+                        override fun onError(error: Int) {
+                            Log.w(TAG, "hindi pack download error $error")
+                            finish(PackDownload.FAILED)
+                        }
+                    },
+                )
+            } else {
+                downloader.triggerModelDownload(recognizerIntent())
+                finish(PackDownload.STARTED)
+            }
+        }.onFailure {
+            Log.w(TAG, "hindi pack download could not start: ${it.javaClass.simpleName}")
+            finish(PackDownload.FAILED)
         }
     }
 

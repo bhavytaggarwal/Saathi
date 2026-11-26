@@ -7,6 +7,8 @@ import android.content.res.Resources
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import com.saathi.app.core.Lang
+import com.saathi.app.core.Language
 import java.util.Locale
 
 /**
@@ -46,35 +48,46 @@ object AccessibilitySetupGuide {
             .getOrDefault("")
 
     /**
-     * Returns the spoken Hindi TTS instruction tailored to the phone's system Settings language
-     * ([language]) and OEM skin ([manufacturer]).
+     * Returns the spoken setup line in Saathi's language ([saathiLanguage]), naming the row exactly
+     * as the phone's Settings show it, which depends on the Settings language ([language]) and the
+     * OEM skin ([manufacturer]).
      */
     fun spokenInstruction(
         language: String = systemLanguage(),
         manufacturer: String = deviceManufacturer(),
+        saathiLanguage: Language = Lang.current,
     ): String {
         val lang = language.trim().lowercase(Locale.ROOT).substringBefore('-').substringBefore('_')
         val oem = manufacturer.trim().lowercase(Locale.ROOT)
         val isSamsung = "samsung" in oem
         val isDownloadedAppsOem = DOWNLOADED_APPS_OEMS.any { it in oem }
-
-        return when (lang) {
-            "en" -> when {
-                isSamsung ->
-                    "Ab 'Installed apps' par dabaiye, phir 'Saathi' ko chalu karke 'Allow' daba dijiye."
-                isDownloadedAppsOem ->
-                    "Ab 'Downloaded apps' par dabaiye, phir 'Saathi' ko chalu karke 'Allow' daba dijiye."
-                else ->
-                    "Ab 'Downloaded apps' ya 'Saathi' par dabaiye, phir 'Saathi' ko chalu karke 'Allow' daba dijiye."
-            }
-            "hi" -> when {
-                isSamsung ->
-                    "Ab 'इंस्टॉल किए गए ऐप्स' par dabaiye, phir 'Saathi' ko chalu karke 'अनुमति दें' daba dijiye."
-                else ->
-                    "Ab 'डाउनलोड किए गए ऐप्स' par dabaiye, phir 'Saathi' ko chalu karke 'अनुमति दें' daba dijiye."
-            }
-            else -> FALLBACK_SPATIAL_INSTRUCTION
+        val or = when (saathiLanguage) {
+            Language.ENGLISH -> "or"
+            Language.KANNADA -> "ಅಥವಾ"
+            else -> "ya"
         }
+        // The row to press and the confirm button, as written on this phone's Settings screen.
+        val (row, allow) = when (lang) {
+            "en" -> when {
+                isSamsung -> "'Installed apps'" to "'Allow'"
+                isDownloadedAppsOem -> "'Downloaded apps'" to "'Allow'"
+                else -> "'Downloaded apps' $or 'Saathi'" to "'Allow'"
+            }
+            "hi" -> (if (isSamsung) "'इंस्टॉल किए गए ऐप्स'" else "'डाउनलोड किए गए ऐप्स'") to "'अनुमति दें'"
+            else -> return spatialInstruction(saathiLanguage)
+        }
+        return when (saathiLanguage) {
+            Language.ENGLISH -> "Now press $row, then turn on Saathi and press $allow."
+            Language.KANNADA -> "ಈಗ $row ಒತ್ತಿ, ನಂತರ 'Saathi' ಆನ್ ಮಾಡಿ $allow ಒತ್ತಿ."
+            else -> "Ab $row par dabaiye, phir 'Saathi' ko chalu karke $allow daba dijiye."
+        }
+    }
+
+    /** For a Settings language whose labels are not known: where to look, not what to read. */
+    fun spatialInstruction(saathiLanguage: Language = Lang.current): String = when (saathiLanguage) {
+        Language.ENGLISH -> "Go down this list, find the Saathi icon, press it, turn it on, and confirm below."
+        Language.KANNADA -> "ಈ ಪಟ್ಟಿಯಲ್ಲಿ ಕೆಳಗೆ ಹೋಗಿ ಸಾಥಿ ಐಕಾನ್ ಹುಡುಕಿ, ಒತ್ತಿ, ಆನ್ ಮಾಡಿ, ಕೆಳಗೆ ಖಚಿತಪಡಿಸಿ."
+        else -> FALLBACK_SPATIAL_INSTRUCTION
     }
 
     /**

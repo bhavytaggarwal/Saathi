@@ -133,3 +133,8 @@ adb pull /sdcard/Android/data/in.getsaathi.app/files/marked.jsonl
 ```
 
 Each marked line has her masked words, the state before the turn and the reply. Copy the words, state and history into a new case and write the expected answer.
+
+## Languages
+
+Cases tagged `language` set `"language": "English"` or `"Kannada"`. That becomes the `Her language:` line in CONTEXT, as the app sends it. `must_not_say` catches Devanagari in an English or Kannada reply, and "tap" or "click" in any. Run them with `--tags language`. Before the LANGUAGE prompt was deployed, 6 of 8 failed because the model answered in Hindi.
+
