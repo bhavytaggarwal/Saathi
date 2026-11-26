@@ -1,27 +1,51 @@
 package com.saathi.app
 
 import android.content.Context
-import android.security.keystore.KeyGenParameterSpec
-import android.security.keystore.KeyProperties
-import android.util.Base64
+import android.provider.Settings
+import com.saathi.app.core.Lang
+import com.saathi.app.core.Language
 import org.json.JSONObject
-import java.security.KeyStore
-import javax.crypto.Cipher
-import javax.crypto.KeyGenerator
-import javax.crypto.SecretKey
-import javax.crypto.spec.GCMParameterSpec
+import java.security.MessageDigest
 
-/** Local settings and memory. The API key is encrypted with a key held by Android Keystore. */
+/** Local settings and memory. */
 class Prefs(context: Context) {
     private val prefs = context.applicationContext.getSharedPreferences("saathi", Context.MODE_PRIVATE)
 
-    var apiKey: String
-        get() = prefs.getString(KEY_API, null)?.let(::decrypt).orEmpty().ifBlank { BuildConfig.EMBEDDED_GEMINI_KEY }
-        set(value) = prefs.edit().putString(KEY_API, if (value.isBlank()) null else encrypt(value.trim())).apply()
+    init {
+        // Every part of the app makes its own Prefs, so this keeps them all on one language.
+        language
+    }
+
+    /** Anonymous SHA-256 hash of ANDROID_ID for Cloud Run per-device quota checks. */
+    val deviceId: String = run {
+        val rawId = runCatching {
+            Settings.Secure.getString(context.contentResolver, Settings.Secure.ANDROID_ID)
+        }.getOrNull().orEmpty().ifBlank { "unknown-device" }
+        MessageDigest.getInstance("SHA-256")
+            .digest(rawId.toByteArray(Charsets.UTF_8))
+            .joinToString("") { "%02x".format(it) }
+    }
 
     var model: String
         get() = prefs.getString("model", null)?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
         set(value) = prefs.edit().putString("model", value.trim()).apply()
+
+    /** Saathi's language. Chosen first in setup. Reading it also makes it the one in use. */
+    var language: Language
+        get() = Language.fromCode(prefs.getString("language", null)).also { Lang.current = it }
+        set(value) {
+            prefs.edit().putString("language", value.code).putBoolean("language_chosen", true).apply()
+            Lang.current = value
+        }
+
+    /** Shows the language step again, from "Change language" in setup. */
+    fun clearLanguageChoice() {
+        prefs.edit().putBoolean("language_chosen", false).apply()
+    }
+
+    /** False until she or her family has picked a language, which is the first setup step. */
+    val languageChosen: Boolean
+        get() = prefs.getBoolean("language_chosen", false)
 
     var herName: String
         get() = prefs.getString("her_name", "").orEmpty()
@@ -37,7 +61,7 @@ class Prefs(context: Context) {
 
     var speechRate: Float
         get() = prefs.getFloat("rate", DEFAULT_RATE)
-        set(value) = prefs.edit().putFloat("rate", value.coerceIn(0.55f, 1.1f)).apply()
+        set(value) = prefs.edit().putFloat("rate", value.coerceIn(0.55f, 1.25f)).apply()
 
     /** Off by default, so her voice stays on the phone. Needed only if no Hindi pack can be installed. */
     var allowOnlineSpeech: Boolean
@@ -48,6 +72,29 @@ class Prefs(context: Context) {
     var followUpListening: Boolean
         get() = prefs.getBoolean("follow_up", true)
         set(value) = prefs.edit().putBoolean("follow_up", value).apply()
+
+    /** Off by default. When on, each turn is saved on the phone, masked, for building eval cases. */
+    var evalLog: Boolean
+        get() = prefs.getBoolean("eval_log", false)
+        set(value) = prefs.edit().putBoolean("eval_log", value).apply()
+
+    var oemAutoStartDone: Boolean
+        get() = prefs.getBoolean("oem_autostart_done", false)
+        set(value) = prefs.edit().putBoolean("oem_autostart_done", value).apply()
+
+    var oemRecentsLockDone: Boolean
+        get() = prefs.getBoolean("oem_recents_lock_done", false)
+        set(value) = prefs.edit().putBoolean("oem_recents_lock_done", value).apply()
+
+    /** True when Saathi automatically called disableSelf() so a strict banking app could open. */
+    var pausedForBanking: Boolean
+        get() = prefs.getBoolean("paused_for_banking", false)
+        set(value) = prefs.edit().putBoolean("paused_for_banking", value).apply()
+
+    /** True once Accessibility has connected at least once, so app launch never nags when disabled. */
+    var onboardingCompleted: Boolean
+        get() = prefs.getBoolean("onboarding_completed", false)
+        set(value) = prefs.edit().putBoolean("onboarding_completed", value).apply()
 
     var bubbleX: Int
         get() = prefs.getInt("bubble_x", -1)
@@ -71,38 +118,8 @@ class Prefs(context: Context) {
         prefs.edit().putString("learned", json.toString()).apply()
     }
 
-    private fun secretKey(): SecretKey {
-        val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
-        (store.getKey(ALIAS, null) as? SecretKey)?.let { return it }
-        val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore")
-        generator.init(
-            KeyGenParameterSpec.Builder(ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
-                .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
-                .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
-                .build()
-        )
-        return generator.generateKey()
-    }
-
-    private fun encrypt(plain: String): String {
-        val cipher = Cipher.getInstance(TRANSFORM).apply { init(Cipher.ENCRYPT_MODE, secretKey()) }
-        val sealed = cipher.iv + cipher.doFinal(plain.toByteArray())
-        return Base64.encodeToString(sealed, Base64.NO_WRAP)
-    }
-
-    private fun decrypt(stored: String): String? = runCatching {
-        val sealed = Base64.decode(stored, Base64.NO_WRAP)
-        val cipher = Cipher.getInstance(TRANSFORM)
-        cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, sealed, 0, IV_SIZE))
-        String(cipher.doFinal(sealed, IV_SIZE, sealed.size - IV_SIZE))
-    }.getOrNull()
-
     companion object {
         const val DEFAULT_MODEL = "gemini-3.6-flash"
         const val DEFAULT_RATE = 0.85f
-        private const val KEY_API = "api_key_sealed"
-        private const val ALIAS = "saathi_api_key"
-        private const val TRANSFORM = "AES/GCM/NoPadding"
-        private const val IV_SIZE = 12
     }
 }

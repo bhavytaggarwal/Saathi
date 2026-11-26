@@ -70,6 +70,13 @@ class PrivacyFilterTest {
         assertTrue(PrivacyFilter.hasSecret(keypad))
     }
 
+    @Test fun namesWhyAScreenIsSecretWithoutScreenText() {
+        assertEquals("password_field", PrivacyFilter.secretReason(listOf(NodeFacts(isPassword = true))))
+        assertEquals("prompt_text", PrivacyFilter.secretReason(listOf(NodeFacts(text = "ENTER UPI PIN"))))
+        assertEquals("number_pad", PrivacyFilter.secretReason((0..9).map { NodeFacts(text = it.toString(), isClickable = true) }))
+        assertNull(PrivacyFilter.secretReason(listOf(NodeFacts(text = "Add bank account", isClickable = true))))
+    }
+
     @Test fun clockAndCalculatorKeepNumberPadsButStillHideOnRealSecrets() {
         val keypad = (0..9).map { NodeFacts(text = it.toString(), isClickable = true) }
         listOf("com.android.deskclock", "com.vivo.calculator").forEach { pkg ->
@@ -123,14 +130,151 @@ class PrivacyFilterTest {
         listOf(
             "com.whatsapp", "com.google.android.apps.messaging", "com.truecaller", "com.google.android.gm",
             "com.android.systemui", "com.sbi.lotusintouch", "com.snapwork.hdfc", "com.csam.icici.bank.imobile",
+            Allowlist.GPAY, "com.phonepe.app", "net.one97.paytm", "com.cred.club", "com.sbi.SBIFreedomPlus",
+            "com.axis.mobile", "com.msf.kbank.mobile", "com.bankofbaroda.mconnect",
+            "com.infrasofttech.CentralBank", "com.fss.pnbpsp",
         ).forEach { assertFalse(it, Allowlist.isAllowed(it)) }
+        assertTrue(Allowlist.isStrictBankApp(Allowlist.GPAY))
+        assertTrue(Allowlist.isStrictBankApp("com.phonepe.app"))
+        assertTrue(Allowlist.isStrictBankApp("net.one97.paytm"))
         assertFalse(Allowlist.isAllowed(null))
     }
 
-    @Test fun androidAllowlistMatchesCodeAllowlist() {
+    @Test fun detectsFlipkartAndAmazonPaymentOptionsScreensWithoutFalsePositivesOnProducts() {
+        val flipkartPaymentOptions = listOf(
+            NodeFacts(text = "Step 3 of 3"),
+            NodeFacts(text = "Payments"),
+            NodeFacts(text = "Total Amount ₹549"),
+            NodeFacts(text = "UPI"),
+            NodeFacts(text = "Google Pay"),
+            NodeFacts(text = "PhonePe"),
+            NodeFacts(text = "Credit / Debit / ATM Card"),
+            NodeFacts(text = "Net Banking"),
+            NodeFacts(text = "Cash on Delivery"),
+        )
+        assertTrue(
+            "Should trigger on Flipkart Payment Options screen",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartPaymentOptions, "com.flipkart.android"),
+        )
+
+        val amazonCheckoutPayment = listOf(
+            NodeFacts(text = "Select a payment method"),
+            NodeFacts(text = "Continue"),
+            NodeFacts(text = "Pay with UPI"),
+            NodeFacts(text = "GPay"),
+            NodeFacts(text = "Paytm"),
+            NodeFacts(text = "Credit or debit card"),
+        )
+        assertTrue(
+            "Should trigger on Amazon Select a payment method screen",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(amazonCheckoutPayment, "in.amazon.mShop.android.shopping"),
+        )
+
+        val swiggyCheckout = listOf(
+            NodeFacts(text = "Payment Options"),
+            NodeFacts(text = "Pay using Google Pay"),
+            NodeFacts(text = "More UPI Options"),
+        )
+        assertTrue(
+            "Should trigger on Swiggy Payment Options screen",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(swiggyCheckout, "in.swiggy.android"),
+        )
+
+        val flipkartWebViewPaymentNoTitle = listOf(
+            NodeFacts(text = "UPI"),
+            NodeFacts(text = "Google Pay"),
+            NodeFacts(text = "Credit / Debit / ATM Card"),
+            NodeFacts(text = "Net Banking"),
+            NodeFacts(text = "Cash on Delivery"),
+        )
+        assertTrue(
+            "Should trigger on WebView payment list even if 'Payments' title node is absent",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartWebViewPaymentNoTitle, "com.flipkart.android"),
+        )
+
+        val flipkartProductDetail = listOf(
+            NodeFacts(text = "Women Cotton Kurta Set"),
+            NodeFacts(text = "₹499"),
+            NodeFacts(text = "Bank Offer: 5% Cashback on Flipkart Axis Bank Credit Card"),
+            NodeFacts(text = "UPI & Net Banking available"),
+            NodeFacts(text = "Easy Payment Options: Cash on Delivery"),
+            NodeFacts(text = "Add to cart", isClickable = true),
+            NodeFacts(text = "Buy Now", isClickable = true),
+        )
+        assertFalse(
+            "Should NOT false-trigger on a product detail page with Add to cart / Buy Now",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartProductDetail, "com.flipkart.android"),
+        )
+
+        val flipkartHomeScreen = listOf(
+            NodeFacts(text = "Search for products, brands and more"),
+            NodeFacts(text = "Fashion"),
+            NodeFacts(text = "Mobiles"),
+            NodeFacts(text = "Home"),
+            NodeFacts(text = "Categories"),
+            NodeFacts(text = "Account"),
+            NodeFacts(text = "Cart"),
+        )
+        assertFalse(
+            "Should NOT false-trigger on Flipkart home screen",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartHomeScreen, "com.flipkart.android"),
+        )
+
+        assertFalse(
+            "Should NOT trigger inside Play Store",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartPaymentOptions, "com.android.vending"),
+        )
+        assertFalse(
+            "Should NOT trigger inside Android Settings",
+            PrivacyFilter.isCheckoutPaymentOptionsScreen(flipkartPaymentOptions, Allowlist.SETTINGS),
+        )
+    }
+
+    @Test fun addsThePhonesOwnClockButNeverAssistantOrMessagingApps() {
+        try {
+            val added = Allowlist.addPhoneApps(
+                clocks = setOf("com.android.BBKClock", "com.google.android.googlequicksearchbox"),
+                calculators = setOf("com.android.bbkcalculator"),
+                launchers = setOf("com.android.settings", "com.google.android.apps.messaging"),
+            )
+            assertEquals(setOf("com.android.BBKClock", "com.android.bbkcalculator"), added)
+            assertTrue(Allowlist.isAllowed("com.android.BBKClock"))
+            assertTrue(Allowlist.hasOrdinaryNumberPad("com.android.BBKClock"))
+            assertEquals("Clock", Allowlist.label("com.android.BBKClock"))
+            assertFalse(Allowlist.isAllowed("com.google.android.googlequicksearchbox"))
+            assertFalse(Allowlist.isAllowed("com.google.android.apps.messaging"))
+            assertEquals("Settings", Allowlist.label("com.android.settings"))
+        } finally {
+            Allowlist.addPhoneApps(emptySet(), emptySet(), emptySet())
+        }
+    }
+
+    @Test fun recognisesChatAppPaymentScreensByClassName() {
+        assertTrue(PrivacyFilter.isPaymentScreenClass("com.whatsapp.payments.ui.IndiaUpiSendPaymentActivity"))
+        assertTrue(PrivacyFilter.isPaymentScreenClass("com.whatsapp.payments.ui.PaymentsHomeActivity"))
+        assertFalse(PrivacyFilter.isPaymentScreenClass("com.whatsapp.Conversation"))
+        assertFalse(PrivacyFilter.isPaymentScreenClass(null))
+        assertTrue(PrivacyFilter.isPaymentScreen(listOf(NodeFacts(text = "Send payment"))))
+    }
+
+    @Test fun labelProbeSkipsChatAndMessageRowsButKeepsMenus() {
+        assertTrue(ProbeRules.skipsRows("androidx.recyclerview.widget.RecyclerView"))
+        assertTrue(ProbeRules.skipsRows("android.widget.ListView"))
+        assertFalse(ProbeRules.skipsRows("androidx.appcompat.widget.MenuPopupWindow\$MenuDropDownListView"))
+        assertTrue(ProbeRules.keep("android.widget.ImageButton", clickable = true, editable = false, insideLabelContainer = false))
+        assertTrue(ProbeRules.keep("android.widget.ImageView", clickable = true, editable = false, insideLabelContainer = false))
+        assertTrue(ProbeRules.keep("androidx.appcompat.view.menu.ListMenuItemView", clickable = true, editable = false, insideLabelContainer = false))
+        assertTrue(ProbeRules.keep("android.widget.TextView", clickable = false, editable = false, insideLabelContainer = true))
+        // Plain text, such as a chat's title, and pictures that are not buttons are never written.
+        assertFalse(ProbeRules.keep("android.widget.TextView", clickable = false, editable = false, insideLabelContainer = false))
+        assertFalse(ProbeRules.keep("android.widget.TextView", clickable = true, editable = false, insideLabelContainer = false))
+        assertFalse(ProbeRules.keep("android.widget.ImageView", clickable = false, editable = false, insideLabelContainer = false))
+        assertFalse(ProbeRules.keep("android.widget.LinearLayout", clickable = true, editable = false, insideLabelContainer = false))
+    }
+
+    @Test fun serviceConfigHasNoPackageFilterSoBlocklistHandlesAllApps() {
         val config = File("src/main/res/xml/accessibility_service_config.xml").readText()
-        val declared = Regex("android:packageNames=\"([^\"]+)\"").find(config)!!.groupValues[1].split(",").toSet()
-        assertEquals(Allowlist.ALL, declared)
+        assertFalse(config.contains("android:packageNames"))
     }
 
     @Test fun serviceConfigCannotPerformGestures() {
@@ -138,28 +282,125 @@ class PrivacyFilterTest {
         assertFalse(config.contains("android:canPerformGestures"))
     }
 
+    @Test fun masksAmountsWithCurrencyAfterOrInHindi() {
+        assertEquals("Paid [number]", PrivacyFilter.maskScreenText("Paid 500 rupees"))
+        assertEquals("[number] bheje", PrivacyFilter.maskScreenText("50 Rs bheje"))
+        assertEquals("[number] बाकी", PrivacyFilter.maskScreenText("रु 250 बाकी"))
+    }
+
+    @Test fun masksDigitsSpokenAsEnglishWordsOrMixed() {
+        assertEquals("otp [number]", PrivacyFilter.filterSpeech("otp फोर फाइव सिक्स सेवन").text)
+        assertEquals("pin [number]", PrivacyFilter.filterSpeech("pin 45 ek 67").text)
+        assertFalse(PrivacyFilter.filterSpeech("10 do packet").masked)
+    }
+
+    @Test fun recognisesACollectRequestOnAPaymentScreen() {
+        val collect = listOf(NodeFacts(text = "Rahul is requesting ₹500"), NodeFacts(text = "Pay ₹500", isClickable = true))
+        assertTrue(PrivacyFilter.isPaymentScreen(collect))
+        assertTrue(PrivacyFilter.isScamScreen(collect))
+        assertFalse(PrivacyFilter.isScamScreen(listOf(NodeFacts(text = "Pay ₹500"))))
+    }
+
     // AI reply contract
 
-    @Test fun parsesAStep() {
-        val reply = AiReply.parse(
-            """{"mode":"step","text":"Add bank account pe tap karo","speech":"Add bank account पे tap करो","point_at":3,"gesture":"tap","task":"add bank"}"""
-        )!!
-        assertEquals("step", reply.mode)
-        assertEquals(3, reply.pointAt)
+    private fun parsed(raw: String) = (AiReply.parse(raw) as AiReply.Parsed.Ok).reply
+
+    private fun invalid(raw: String) = (AiReply.parse(raw) as AiReply.Parsed.Invalid).reason
+
+    @Test fun parsesAGuideStep() {
+        val reply = parsed(
+            """{"intent":"guide_step","confidence":0.92,"say_roman":"Add bank account pe tap karo","say_devanagari":"Add bank account पे tap करो","target_element":3,"gesture":"tap","state_patch":{}}"""
+        )
+        assertEquals("guide_step", reply.intent)
+        assertEquals(3, reply.targetElement)
         assertEquals("Add bank account पे tap करो", reply.line.speech)
     }
 
-    @Test fun parsesListItemsAndFence() {
-        val reply = AiReply.parse(
-            "```json\n{\"mode\":\"list_add\",\"text\":\"\",\"speech\":\"\",\"items\":[{\"name\":\"Maggi\",\"name_hi\":\"मैगी\",\"qty\":\"2 packet\"}]}\n```"
-        )!!
-        assertEquals("2 packet", reply.items.single().qty)
-        assertEquals("मैगी", reply.items.single().nameHi)
+    @Test fun ignoresATargetOutsidePointingIntents() {
+        val reply = parsed("""{"intent":"chat","confidence":1,"say_roman":"Namaste","say_devanagari":"नमस्ते","target_element":4,"state_patch":{}}""")
+        assertNull(reply.targetElement)
     }
 
-    @Test fun rejectsAnythingOffContract() {
-        assertNull(AiReply.parse("not json"))
-        assertNull(AiReply.parse("""{"mode":"tap_button","text":"x","speech":"x"}"""))
+    @Test fun parsesListActionAndFence() {
+        val reply = parsed(
+            "```json\n{\"intent\":\"list_add\",\"confidence\":0.9,\"say_roman\":\"\",\"say_devanagari\":\"\"," +
+                "\"action\":{\"type\":\"list_add\",\"list\":\"shopping\",\"items\":[{\"name\":\"Maggi\",\"name_hi\":\"मैगी\",\"qty\":\"2 packet\"}]},\"state_patch\":{}}\n```"
+        )
+        assertEquals("2 packet", reply.action!!.items.single().qty)
+        assertEquals("मैगी", reply.action!!.items.single().nameHi)
+    }
+
+    @Test fun parsesADailyReminder() {
+        val reply = parsed(
+            """{"intent":"reminder_set","confidence":0.8,"say_roman":"Roz raat 9 baje bolungi.","say_devanagari":"","action":{"type":"reminder_set","text":"dawai","time":"21:00","repeat":"daily"},"state_patch":{}}"""
+        )
+        assertEquals("daily", reply.action!!.repeat)
+        assertEquals("dawai", reply.action!!.textHi)
+    }
+
+    @Test fun rejectsAnythingOffContractWithAReason() {
+        assertEquals("it was not one JSON object", invalid("not json"))
+        assertTrue(invalid("""{"intent":"tap_button","confidence":1,"say_roman":"x","say_devanagari":"x"}""").contains("tap_button"))
+        assertEquals("confidence is missing", invalid("""{"intent":"chat","say_roman":"x","say_devanagari":"x"}"""))
+        assertEquals("say_roman is empty", invalid("""{"intent":"chat","confidence":1,"say_roman":"","say_devanagari":""}"""))
+        assertEquals("list_add needs action.items", invalid("""{"intent":"list_add","confidence":1,"say_roman":"","say_devanagari":""}"""))
+        assertTrue(
+            invalid("""{"intent":"reminder_set","confidence":1,"say_roman":"","say_devanagari":"","action":{"type":"reminder_set","text":"dawai","time":"raat 9","repeat":"daily"}}""")
+                .contains("raat 9")
+        )
+    }
+
+    // Session state
+
+    @Test fun startsAGoalAndKeepsAppOwnedFields() {
+        val state = SessionState()
+        val first = state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add a bank account in GPay","kind":"guide","app":"Google Pay"}}"""))
+        assertTrue(first.goalStarted)
+        state.goal = state.goal!!.copy(step = 3)
+        // A text-only change refines the same goal and keeps the step count.
+        val refined = state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add SBI account in GPay","step":99}}"""))
+        assertFalse(refined.goalStarted)
+        assertEquals(3, state.goal!!.step)
+        assertEquals("Add SBI account in GPay", state.goal!!.text)
+    }
+
+    @Test fun aNewKindStartsFreshAndNullClears() {
+        val state = SessionState()
+        state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add bank","kind":"guide"},"last_step":{"target_label":"Add bank account","expected_next":"bank list"}}"""))
+        assertEquals("Add bank account", state.lastStep.targetLabel)
+        val topic = state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Medicine reminder at 9 pm","kind":"reminder"}}"""))
+        assertTrue(topic.goalStarted)
+        assertNull(state.lastStep.targetLabel)
+        state.applyPatch(org.json.JSONObject("""{"last_step":{"expected_next":"x"},"pending_question":{"question":"List ya reminder?","options":["list","reminder"]}}"""))
+        assertEquals(listOf("list", "reminder"), state.pendingQuestion!!.options)
+        state.applyPatch(org.json.JSONObject("""{"goal":null,"pending_question":null}"""))
+        assertNull(state.goal)
+        assertNull(state.pendingQuestion)
+    }
+
+    @Test fun ignoresStatusesTheAppOwns() {
+        val state = SessionState()
+        state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add bank","kind":"guide"}}"""))
+        state.applyPatch(org.json.JSONObject("""{"goal":{"status":"expired"}}"""))
+        assertEquals(SessionState.ACTIVE, state.goal!!.status)
+        state.applyPatch(org.json.JSONObject("""{"goal":{"status":"done"}}"""))
+        assertEquals(SessionState.DONE, state.goal!!.status)
+    }
+
+    @Test fun stateJsonHasEveryFieldAndNoMissingKeys() {
+        val state = SessionState()
+        state.lastActivityAt = 1_000
+        state.applyPatch(org.json.JSONObject("""{"goal":{"text":"Add bank","kind":"guide"}}"""))
+        state.lastAction = LastAction("list_add", list = "shopping", items = listOf("doodh"))
+        val json = state.toJson(now = 13_000)
+        assertEquals(12, json.getJSONObject("goal").getInt("idle_s"))
+        assertTrue(json.isNull("pending_question"))
+        assertTrue(json.has("screen"))
+        state.screen = ScreenFacts("WhatsApp", null, changed = true, readable = true, mode = SessionState.MODE_CONTROLS_ONLY)
+        val screen = state.toJson(now = 13_000).getJSONObject("screen")
+        assertEquals("controls_only", screen.getString("mode"))
+        assertTrue(screen.isNull("title"))
+        assertEquals("doodh", json.getJSONObject("last_action").getJSONArray("items").getString(0))
     }
 
     @Test fun validatesReminderTimes() {
@@ -167,5 +408,24 @@ class PrivacyFilterTest {
         assertNull(AiReply.parseDailyTime("25:00"))
         assertNull(AiReply.parseOnceTime("kal subah"))
         assertTrue(AiReply.parseOnceTime("2026-11-07 10:00") != null)
+    }
+
+    @Test
+    fun aCodeInAWhatsAppChatPreviewDoesNotHideSaathi() {
+        val preview = NodeFacts(text = "123456 is your verification code. Do not share it.", isClickable = true)
+        val chatList = listOf(NodeFacts(text = "Chats"), preview, NodeFacts(text = "ओटीपी 4321 है", isClickable = true))
+        assertNull(PrivacyFilter.secretReason(chatList, ignoreRowText = true))
+        // Outside chat apps the same text still hides Saathi, as before.
+        assertEquals("prompt_text", PrivacyFilter.secretReason(chatList))
+    }
+
+    @Test
+    fun whatsAppsOwnPinPromptStillHidesSaathi() {
+        val twoStep = listOf(NodeFacts(text = "Enter your 6-digit PIN"), NodeFacts(text = "Next", isClickable = true))
+        assertEquals("prompt_text", PrivacyFilter.secretReason(twoStep, ignoreRowText = true))
+        val pinBox = listOf(NodeFacts(hint = "Enter PIN", isEditable = true, isClickable = true))
+        assertEquals("labelled_field", PrivacyFilter.secretReason(pinBox, ignoreRowText = true))
+        val password = listOf(NodeFacts(isPassword = true, isEditable = true, isClickable = true))
+        assertEquals("password_field", PrivacyFilter.secretReason(password, ignoreRowText = true))
     }
 }

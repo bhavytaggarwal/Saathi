@@ -12,3 +12,9 @@ secrets.properties
 .env*
 *.keystore
 *.jks
+eval/results/
+__pycache__/
+*.aab
+*.bak
+.venv/
+venv/

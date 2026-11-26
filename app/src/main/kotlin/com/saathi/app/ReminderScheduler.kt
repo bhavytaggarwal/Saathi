@@ -1,5 +1,6 @@
 package com.saathi.app
 
+import com.saathi.app.core.Lines
 import android.Manifest
 import android.app.AlarmManager
 import android.app.Notification
@@ -197,7 +198,7 @@ class ReminderScheduler(context: Context) {
         )
         val notification = Notification.Builder(ctx, CHANNEL)
             .setSmallIcon(R.drawable.ic_notification)
-            .setContentTitle("Saathi: yaad dila rahi hoon")
+            .setContentTitle(Lines.REMINDER_NOTIFICATION_TITLE)
             .setContentText(reminder.title)
             .setCategory(Notification.CATEGORY_REMINDER)
             .setAutoCancel(true)
@@ -216,9 +217,9 @@ class ReminderScheduler(context: Context) {
         private const val CHANNEL = "reminders"
         private const val NOTIFICATION_BASE = 1000
         private const val DAY_MS = 24 * 60 * 60 * 1000L
-        const val ACTION_FIRE = "com.saathi.app.FIRE"
-        const val ACTION_DONE = "com.saathi.app.DONE"
-        const val ACTION_SNOOZE = "com.saathi.app.SNOOZE"
+        const val ACTION_FIRE = "${BuildConfig.APPLICATION_ID}.FIRE"
+        const val ACTION_DONE = "${BuildConfig.APPLICATION_ID}.DONE"
+        const val ACTION_SNOOZE = "${BuildConfig.APPLICATION_ID}.SNOOZE"
         const val EXTRA_ID = "id"
     }
 }
