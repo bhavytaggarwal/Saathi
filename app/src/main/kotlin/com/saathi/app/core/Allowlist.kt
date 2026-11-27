@@ -59,37 +59,15 @@ object Allowlist {
         "com.oneplus.calculator",
     )
 
-    private val APPS = mapOf(
-        GPAY to "Google Pay",
-        SETTINGS to "Settings",
-        "com.google.android.youtube" to "YouTube",
-        "com.android.vending" to "Play Store",
-        "com.openai.chatgpt" to "ChatGPT",
-        "com.google.android.apps.bard" to "Gemini",
-        "com.google.android.apps.maps" to "Google Maps",
-        "com.zeptoconsumerapp" to "Zepto",
-        "com.grofers.customerapp" to "Blinkit",
-        "com.snapchat.android" to "Snapchat",
-        "com.android.chrome" to "Chrome",
-        "in.swiggy.android" to "Swiggy",
-        "com.application.zomato" to "Zomato",
-        "com.flipkart.android" to "Flipkart",
-        "in.amazon.mShop.android.shopping" to "Amazon",
-        "com.instagram.android" to "Instagram",
-        "com.facebook.katana" to "Facebook",
-        "com.ubercab" to "Uber",
-        "com.olacabs.customer" to "Ola",
-        "com.rapido.passenger" to "Rapido",
-    )
-
-    /** Known named apps, launchers, clocks and calculators. */
-    val ALL: Set<String> = APPS.keys + LAUNCHERS + CLOCKS + CALCULATORS
-
     // This phone's own Clock, Calculator and home screen apps, found from Android at startup,
     // because phone makers name them differently (Vivo, Tecno and others).
     @Volatile private var phoneClocks: Set<String> = emptySet()
     @Volatile private var phoneCalculators: Set<String> = emptySet()
     @Volatile private var phoneLaunchers: Set<String> = emptySet()
+
+    // Populated at runtime from Android's PackageManager so any installed Indian or global app gets
+    // its real user-visible app name without maintaining a hardcoded list of consumer apps.
+    @Volatile var appLabelResolver: ((String) -> String?)? = null
 
     /**
      * Major Indian banking and UPI apps that block or refuse to proceed if any third-party
@@ -143,35 +121,36 @@ object Allowlist {
      */
     private val NEVER = Regex(
         "(?i)whatsapp|messaging|mms|truecaller|android\\.gm|systemui|sbi|hdfc|icici|axis|kotak|" +
-            "googlequicksearchbox|googleassistant|bank|paytm|phonepe|bhim|cred|mobikwik|" +
+            "bank|paytm|phonepe|bhim|cred|mobikwik|" +
             "bitwarden|1password|lastpass|keepass|authenticator"
     )
 
     /**
+     * Packages that answer [AlarmClock.ACTION_SHOW_ALARMS] or [Intent.ACTION_MAIN] on some phones
+     * (e.g. Google App / Assistant, Settings) but are not the phone's Clock, Calculator, or Home
+     * launcher.
+     */
+    private val NON_CLOCK_OR_LAUNCHER_APPS = Regex(
+        "(?i)googlequicksearchbox|googleassistant|bard|gemini|bixby|alexa|android\\.settings"
+    )
+
+    /**
      * Adds the phone's own Clock, Calculator and Launcher apps so [isLauncher] and
-     * [hasOrdinaryNumberPad] recognise them on every phone maker. Anything matching [NEVER] is
-     * dropped here as well. Returns what was added beyond [ALL].
+     * [hasOrdinaryNumberPad] recognise them on every phone maker. Anything matching [NEVER] or
+     * [NON_CLOCK_OR_LAUNCHER_APPS] is dropped here as well.
      */
     fun addPhoneApps(clocks: Set<String>, calculators: Set<String>, launchers: Set<String>): Set<String> {
-        fun clean(found: Set<String>) = found.filterTo(HashSet()) { !NEVER.containsMatchIn(it) && it !in APPS }
+        fun clean(found: Set<String>) = found.filterTo(HashSet()) {
+            !NEVER.containsMatchIn(it) && !NON_CLOCK_OR_LAUNCHER_APPS.containsMatchIn(it)
+        }
         phoneClocks = clean(clocks)
         phoneCalculators = clean(calculators)
         phoneLaunchers = clean(launchers)
-        return (phoneClocks + phoneCalculators + phoneLaunchers) - ALL
+        return (phoneClocks + phoneCalculators + phoneLaunchers) - (LAUNCHERS + CLOCKS + CALCULATORS)
     }
 
     private fun isClock(pkg: String) = pkg in CLOCKS || pkg in phoneClocks
     private fun isCalculator(pkg: String) = pkg in CALCULATORS || pkg in phoneCalculators
-
-    private val SHOPPING_APPS = setOf(
-        "com.zeptoconsumerapp",
-        "com.grofers.customerapp",
-        "in.swiggy.android",
-        "com.application.zomato",
-        "com.flipkart.android",
-        "in.amazon.mShop.android.shopping",
-        "com.myntra.android",
-    )
 
     /**
      * Known clean, text-heavy packages where DOM-only reading is used and screenshots are skipped
@@ -208,13 +187,6 @@ object Allowlist {
                 CONTACTS_OR_DIALER_REGEX.containsMatchIn(pkg)
             )
 
-    /**
-     * Shopping and delivery apps show "Proceed to pay" or "Payment method" on their cart/checkout
-     * screens. Those are ordinary checkout buttons, whereas PIN/OTP/CVV screens are caught by
-     * [PrivacyFilter.hasSecret].
-     */
-    fun isShoppingApp(pkg: String?): Boolean = pkg != null && pkg in SHOPPING_APPS
-
     /** Number pads are normal in these apps, so a pad alone does not mean a PIN is being asked for. */
     fun hasOrdinaryNumberPad(pkg: String?): Boolean = pkg != null && (isClock(pkg) || isCalculator(pkg))
 
@@ -242,9 +214,11 @@ object Allowlist {
         isLauncher(pkg) -> "Phone home or recent apps screen"
         isClock(pkg) -> "Clock"
         isCalculator(pkg) -> "Calculator"
-        pkg in APPS -> APPS.getValue(pkg)
+        pkg == SETTINGS -> "Settings"
+        pkg == "com.android.vending" -> "Play Store"
         pkg in ASK_FIRST -> ASK_FIRST.getValue(pkg)
         !isAllowed(pkg) -> "an app Saathi cannot see"
-        else -> pkg.substringAfterLast('.').replaceFirstChar { it.uppercase() }
+        else -> appLabelResolver?.invoke(pkg)?.takeIf { it.isNotBlank() }
+            ?: pkg.substringAfterLast('.').replaceFirstChar { it.uppercase() }
     }
 }

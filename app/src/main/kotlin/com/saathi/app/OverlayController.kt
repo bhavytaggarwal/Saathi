@@ -211,10 +211,27 @@ class OverlayController(private val context: Context, private val prefs: Prefs, 
                 cornerRadius = 26 * density
             }
             setOnClickListener {
+                val hostContext = this@OverlayController.context
                 showEnableAccessibilityCard(false)
-                cb.onEnableAccessibilityTapped()
-                val intent = AccessibilitySetupGuide.createSettingsIntent(context, newTask = true)
-                runCatching { context.startActivity(intent) }
+                if (!prefs.accessibilityDisclosureAccepted) {
+                    // User previously declined the Prominent Disclosure and is now asking for
+                    // screen guidance: reset the decline flag and show Step 2 Prominent Disclosure
+                    // in MainActivity so they must explicitly tap Agree before Settings opens.
+                    prefs.accessibilityDeclined = false
+                    prefs.onboardingCompleted = false
+                    if (hostContext is MainActivity) {
+                        hostContext.showAccessibilityDisclosureFromInApp()
+                    } else {
+                        val intent = Intent(hostContext, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        }
+                        runCatching { hostContext.startActivity(intent) }
+                    }
+                } else {
+                    cb.onEnableAccessibilityTapped()
+                    val intent = AccessibilitySetupGuide.createSettingsIntent(hostContext, newTask = true)
+                    runCatching { hostContext.startActivity(intent) }
+                }
             }
         }
         addView(titleView)

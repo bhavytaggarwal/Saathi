@@ -16,9 +16,8 @@ class ScreenAccessTest {
         assertTrue(answer(wa, yes = true, now = at))
     }
 
-    @Test fun whatsAppIsAskFirstAndNeverOnTheFixedList() {
+    @Test fun whatsAppIsAskFirstAndAnyConsumerAppIsAllowedByDefault() {
         assertEquals(Allowlist.Tier.ASK_FIRST, Allowlist.tier(wa))
-        assertFalse(wa in Allowlist.ALL)
         assertEquals(Allowlist.Tier.NEVER, Allowlist.tier("com.whatsapp.w4b"))
         assertEquals(Allowlist.Tier.NEVER, Allowlist.tier("com.google.android.apps.messaging"))
         assertEquals(Allowlist.Tier.NEVER, Allowlist.tier("com.sbi.lotusintouch"))
@@ -31,6 +30,8 @@ class ScreenAccessTest {
         assertEquals(Allowlist.Tier.ALLOWED, Allowlist.tier("com.zeptoconsumerapp"))
         assertEquals(Allowlist.Tier.ALLOWED, Allowlist.tier("com.grofers.customerapp"))
         assertEquals(Allowlist.Tier.ALLOWED, Allowlist.tier("com.snapchat.android"))
+        assertEquals(Allowlist.Tier.ALLOWED, Allowlist.tier("com.meesho.supply"))
+        assertEquals(Allowlist.Tier.ALLOWED, Allowlist.tier("com.jio.jiomart"))
         assertEquals("WhatsApp", Allowlist.label(wa))
     }
 

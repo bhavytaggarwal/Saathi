@@ -16,7 +16,7 @@ from google import genai
 from google.genai import types
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-CLIENT_KT = ROOT / "app/src/main/kotlin/com/saathi/app/GeminiClient.kt"
+BACKEND_MAIN = ROOT / "backend/main.py"
 
 # Pricing assumptions (USD per 1M tokens)
 FLASH_LITE_INPUT_PER_1M = 0.075
@@ -28,9 +28,9 @@ USD_TO_INR = 84.50
 
 
 def load_system_and_schema():
-    src = CLIENT_KT.read_text(encoding="utf-8")
-    schema = json.loads(re.search(r'RESPONSE_SCHEMA = """(.*?)"""', src, re.S).group(1))
-    system = re.search(r'val SYSTEM = """(.*?)"""\.trim\(\)', src, re.S).group(1).strip()
+    src = BACKEND_MAIN.read_text(encoding="utf-8")
+    schema = json.loads(re.search(r'RESPONSE_SCHEMA[^=]*=\s*json\.loads\(\s*"""(.*?)"""\s*\)', src, re.S).group(1))
+    system = re.search(r'SYSTEM_PROMPT\s*=\s*"""(.*?)"""\.strip\(\)', src, re.S).group(1).strip()
     return system, schema
 
 

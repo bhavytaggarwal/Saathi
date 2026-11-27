@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Runs Saathi's eval cases against Gemini and scores them.
 
-The system instruction and reply schema are read from GeminiClient.kt, and each prompt is built the
-same way as Assistant.buildPrompt, so the eval tests what the app sends. Standard library only.
+The system instruction and reply schema are read from backend/main.py (the single source of truth),
+and each prompt is built the same way as Assistant.buildPrompt, so the eval tests what the app
+sends. Standard library only.
 
     /usr/bin/python3 -I eval/run_eval.py --dry-run          # check the cases, no calls, free
     /usr/bin/python3 -I eval/run_eval.py --limit 5          # five live calls
@@ -24,8 +25,7 @@ import urllib.request
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 EVAL = ROOT / "eval"
-CLIENT = ROOT / "app/src/main/kotlin/com/saathi/app/GeminiClient.kt"
-PREFS = ROOT / "app/src/main/kotlin/com/saathi/app/Prefs.kt"
+BACKEND_MAIN = ROOT / "backend/main.py"
 CONTROLS = ROOT / "app/src/main/kotlin/com/saathi/app/core/ControlsOnly.kt"
 HIDDEN = "[hidden]"
 
@@ -43,10 +43,10 @@ SAVING = {"list_add", "list_remove", "list_check", "list_clear", "reminder_set"}
 
 
 def load_app_parts():
-    src = CLIENT.read_text(encoding="utf-8")
-    schema = json.loads(re.search(r'RESPONSE_SCHEMA = """(.*?)"""', src, re.S).group(1))
-    system = re.search(r'val SYSTEM = """(.*?)"""\.trim\(\)', src, re.S).group(1).strip()
-    model = re.search(r'DEFAULT_MODEL = "([^"]+)"', PREFS.read_text(encoding="utf-8")).group(1)
+    src = BACKEND_MAIN.read_text(encoding="utf-8")
+    schema = json.loads(re.search(r'RESPONSE_SCHEMA[^=]*=\s*json\.loads\(\s*"""(.*?)"""\s*\)', src, re.S).group(1))
+    system = re.search(r'SYSTEM_PROMPT\s*=\s*"""(.*?)"""\.strip\(\)', src, re.S).group(1).strip()
+    model = re.search(r'DEFAULT_MODEL\s*=\s*"([^"]+)"', src).group(1)
     return system, schema, model
 
 

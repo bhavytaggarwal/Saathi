@@ -241,7 +241,9 @@ class PrivacyFilterTest {
             assertTrue(Allowlist.isAllowed("com.android.BBKClock"))
             assertTrue(Allowlist.hasOrdinaryNumberPad("com.android.BBKClock"))
             assertEquals("Clock", Allowlist.label("com.android.BBKClock"))
-            assertFalse(Allowlist.isAllowed("com.google.android.googlequicksearchbox"))
+            assertFalse(Allowlist.hasOrdinaryNumberPad("com.google.android.googlequicksearchbox"))
+            assertTrue(Allowlist.isAllowed("com.google.android.googlequicksearchbox"))
+            assertTrue(Allowlist.isAllowed("com.google.android.apps.bard"))
             assertFalse(Allowlist.isAllowed("com.google.android.apps.messaging"))
             assertEquals("Settings", Allowlist.label("com.android.settings"))
         } finally {

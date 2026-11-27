@@ -16,6 +16,7 @@ data class NodeFacts(
 /** Rules enforced in code on the phone, never left to the AI. */
 object PrivacyFilter {
     const val MASK = "[number]"
+    const val MIN_NUMBER_WORDS = 3
     private const val ID_MASK = "[id]"
 
     private val EMAIL_OR_UPI = Regex("[\\w.+-]+@[\\w.-]+")
@@ -39,7 +40,13 @@ object PrivacyFilter {
     private val NUMBER_WORDS = setOf(
         "zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine",
         "shunya", "ek", "do", "teen", "char", "chaar", "panch", "paanch", "che", "chhe", "chah",
-        "saat", "sat", "aath", "ath", "nau", "no",
+        "saat", "sat", "aath", "ath", "nau", "no", "oh", "double", "triple",
+        "ten", "eleven", "twelve", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety", "hundred",
+        // Hindi tens. Not "saath" (60), which also means "with": "ek saath do kaam".
+        "das", "gyarah", "barah", "baarah", "terah", "chaudah", "pandrah", "solah", "satrah", "atharah", "unnis",
+        "bees", "tees", "chalis", "chaalis", "pachas", "pachaas", "sattar", "assi", "nabbe", "sau",
+        "दस", "ग्यारह", "बारह", "तेरह", "चौदह", "पंद्रह", "सोलह", "सत्रह", "अठारह", "उन्नीस", "बीस", "तीस", "चालीस", "पचास", "सत्तर", "अस्सी", "नब्बे", "सौ",
+        "ಹತ್ತು", "ಇಪ್ಪತ್ತು", "ಮೂವತ್ತು", "ನೂರು", "hattu", "ippattu", "nooru",
         "शून्य", "एक", "दो", "तीन", "चार", "पांच", "पाँच", "छह", "छः", "छे", "सात", "आठ", "नौ",
         // The Hindi recogniser often writes English number words in Devanagari.
         "जीरो", "ज़ीरो", "वन", "टू", "थ्री", "फोर", "फ़ोर", "फाइव", "फ़ाइव", "सिक्स", "सेवन", "एट", "नाइन",
@@ -60,15 +67,19 @@ object PrivacyFilter {
      * as digits ("4 5 6 7"), Devanagari digits, words ("ek do teen char") or a mix ("45 ek 67").
      */
     fun filterSpeech(input: String): SpeechResult {
-        val digitsMasked = maskDigitRuns(input)
+        val idsMasked = PiiMasker.maskIds(input)
+        val digitsMasked = maskDigitRuns(idsMasked)
         val tokens = digitsMasked.split(Regex("\\s+")).filter { it.isNotEmpty() }
         val output = mutableListOf<String>()
         var run = mutableListOf<String>()
         var runDigits = 0
         var wordsMasked = false
 
+        var runWords = 0
+
         fun flush() {
-            if (runDigits >= 4) {
+            // Four digits, or three number words in a row ("nine eight four", "ek do teen").
+            if (runDigits >= 4 || runWords >= MIN_NUMBER_WORDS) {
                 output += MASK
                 wordsMasked = true
             } else {
@@ -76,12 +87,14 @@ object PrivacyFilter {
             }
             run = mutableListOf()
             runDigits = 0
+            runWords = 0
         }
         for (token in tokens) {
             val bare = token.trim(',', '.', '?', '!', '।').lowercase()
             if (bare in NUMBER_WORDS) {
                 run += token
                 runDigits += 1
+                runWords += 1
             } else if (bare.isNotEmpty() && bare.all(Char::isDigit)) {
                 run += token
                 runDigits += bare.length
@@ -92,10 +105,53 @@ object PrivacyFilter {
         }
         flush()
 
-        val text = output.joinToString(" ")
+        val numbersOnly = output.joinToString(" ")
         val masked = wordsMasked || digitsMasked != input
-        val onlyNumber = masked && text.replace(MASK, "").none(Char::isLetter)
+        val onlyNumber = masked && numbersOnly.replace(MASK, "").replace(PiiMasker.ID, "").none(Char::isLetter)
+        // Names and addresses she dictates while filling a form. These never trigger the warning.
+        val text = PiiMasker.maskPersonal(numbersOnly)
         return SpeechResult(text, masked, masked && (onlyNumber || SECRET_TALK.containsMatchIn(input)))
+    }
+
+    // IDs and credentials she might read out. Plain "pan" is too common a word, so PAN needs
+    // "card" or "number" after it.
+    private val SENSITIVE_ID = Regex(
+        "(?i)\\b(aadhaa?r|aadhar\\s*card|pan\\s+(card|number|no)|account\\s+(number|no)|khata\\s+(number|no|nambar)|" +
+            "card\\s+(number|no)|cvv|cvc|password|passcode|pin|mpin|upi\\s+pin|atm\\s+pin|otp|passport\\s+(number|no))\\b|" +
+            "आधार|पैन\\s+(कार्ड|नंबर)|खाता\\s+नंबर|अकाउंट\\s+नंबर|पासवर्ड|पिन|ओटीपी|सीवीवी|" +
+            "ಆಧಾರ್|ಪ್ಯಾನ್|ಖಾತೆ\\s+ಸಂಖ್ಯೆ|ಪಾಸ್‌ವರ್ಡ್|ಪಾಸ್ವರ್ಡ್|ಪಿನ್|ಒಟಿಪಿ|ಓಟಿಪಿ"
+    )
+
+    // Her own ID or credential: "mera", "meri", "mere", "my", Devanagari and Kannada.
+    private val POSSESSIVE = Regex("(?i)\\b(mera|meri|mere|mujhe|my)\\b|मेरा|मेरी|मेरे|ನನ್ನ")
+
+    // Reading it out: the ID word followed by "hai", a colon or a number, or a dictation verb.
+    private val DICTATION = Regex(
+        "(?i)\\b(number|no|nambar|card|pin|password|otp|cvv|cvc)\\s*(hai|he|h|is|[:=-]|\\p{Nd}|\\[number\\])|" +
+            "\\b(likho|likh\\s+(lo|do|le)|note\\s+(karo|kar\\s+lo|kar\\s+lijiye)|save\\s+(karo|kar\\s+lo)|" +
+            "yaad\\s+rakh(o|na|ना)|sun\\s+lo|bata\\s+(rahi|raha|rhi|deti|dun|du)|ye\\s+raha|yeh\\s+raha)\\b|" +
+            "(नंबर|पासवर्ड|पिन|ओटीपी)\\s*(है|:)|लिखो|लिख\\s+लो|नोट\\s+करो|ಬರೆದುಕೊಳ್ಳಿ|ಇದು"
+    )
+
+    // Asking how to do something with the ID, not reading it out.
+    private val HOW_TO = Regex(
+        "(?i)\\b(kaise|kese|kaisey|kahan|kaha|kidhar|kyun|kyu|bhool|bhul|reset|change|badal\\w*|update|" +
+            "banwa\\w*|bana\\w*|apply|link\\s+kar\\w*|kho\\s+gay\\w*|forgot|forget|how|where|why|lost)\\b|" +
+            "कैसे|कहाँ|कहां|क्यों|भूल|बदल|ಹೇಗೆ|ಎಲ್ಲಿ|ಮರೆತ"
+    )
+
+    /**
+     * True when she is reading out her own ID or credential (Aadhaar, PAN, account or card number,
+     * CVV, password, PIN, OTP), so Saathi warns on the phone and sends nothing. A number spoken
+     * next to such a word always counts. Without a number, it counts only when she says it is
+     * hers and dictates it ("mera password hai...", "mera account number likho"), and never for a
+     * how-to question ("Aadhar mei address kaise change krte h", "password reset kaise karein").
+     */
+    fun isSharingSensitiveData(raw: String): Boolean {
+        if (!SENSITIVE_ID.containsMatchIn(raw)) return false
+        if (filterSpeech(raw).masked) return true
+        if (HOW_TO.containsMatchIn(raw)) return false
+        return POSSESSIVE.containsMatchIn(raw) && DICTATION.containsMatchIn(raw)
     }
 
     private val SECRET_FIELD = Regex(

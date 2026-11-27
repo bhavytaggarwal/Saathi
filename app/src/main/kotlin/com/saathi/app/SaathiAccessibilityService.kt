@@ -30,17 +30,19 @@ class SaathiAccessibilityService : AccessibilityService() {
     // this session. Together with the fixed list they make up the event filter.
     private var phoneApps: Set<String> = emptySet()
     private var sessionApps: Set<String> = emptySet()
-    @Volatile private var steppingOutForBanking = false
+    @Volatile private var isDisablingForBank = false
 
     override fun onServiceConnected() {
         instance = this
-        steppingOutForBanking = false
+        isDisablingForBank = false
         // Stop any pending setup TTS from MainActivity or in-app Assistant immediately.
         VoiceIO.stopAllSpeaking()
         cancelReEnableNotification()
         Prefs(this).apply {
             pausedForBanking = false
             onboardingCompleted = true
+            accessibilityDisclosureAccepted = true
+            accessibilityDeclined = false
         }
         addPhoneApps()
         // Set before start(), because start() fires reminders missed while the service was away,
@@ -51,19 +53,14 @@ class SaathiAccessibilityService : AccessibilityService() {
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+        if (isDisablingForBank) return
         val pkg = event?.packageName?.toString() ?: return
         // 1. Strict Banking & UPI Apps (Google Pay, PhonePe, Paytm, YONO SBI, HDFC, ICICI, Axis,
-        // Kotak, bob World, PNB One): post 1-tap re-enable notification, remove overlays, save
-        // pausedForBanking = true, speak reactive reassurance, and call disableSelf().
+        // Kotak, bob World, PNB One): immediately hide overlays, save pausedForBanking = true,
+        // post 1-tap re-enable notification, speak calm reassurance, and call disableSelf() only
+        // after TTS finishes (with a hard 4500ms fallback timeout).
         if (pkg in STRICT_BANK_PACKAGES) {
-            if (!steppingOutForBanking) {
-                steppingOutForBanking = true
-                Log.i("SaathiPrivacy", "Strict bank/UPI app $pkg detected; stepping out with disableSelf()")
-                Prefs(this).pausedForBanking = true
-                postReEnableNotification()
-                assistant?.stepOutForStrictBankApp(pkg, Lines.BANK_STEP_OUT_SPEECH)
-                disableSelf()
-            }
+            triggerBankStepOut(pkg, Lines.BANK_STEP_OUT_SPEECH, "Strict bank/UPI app $pkg detected")
             return
         }
         // 2. Other financial or credential packages: immediately pause the AI overlay and
@@ -81,23 +78,41 @@ class SaathiAccessibilityService : AccessibilityService() {
      * (e.g. Flipkart / Amazon Payment Options -> Google Pay) is detected, BEFORE GPay launches.
      */
     fun proactiveCheckoutStepOut(pkg: String) {
-        if (steppingOutForBanking) return
-        steppingOutForBanking = true
-        Log.i("SaathiPrivacy", "Merchant checkout/payment screen in $pkg detected; proactively calling disableSelf()")
+        triggerBankStepOut(
+            pkg,
+            Lines.CHECKOUT_PAYMENT_STEP_OUT_SPEECH,
+            "Merchant checkout/payment screen in $pkg detected",
+        )
+    }
+
+    private fun triggerBankStepOut(pkg: String, speech: String, logReason: String) {
+        if (isDisablingForBank) return
+        isDisablingForBank = true
+        Log.i("SaathiPrivacy", "$logReason; speaking reassurance before disableSelf()")
         Prefs(this).pausedForBanking = true
         postReEnableNotification()
-        assistant?.stepOutForStrictBankApp(pkg, Lines.CHECKOUT_PAYMENT_STEP_OUT_SPEECH)
-        disableSelf()
+        val activeAssistant = assistant
+        if (activeAssistant != null) {
+            activeAssistant.stepOutForStrictBankApp(pkg, speech) {
+                disableSelf()
+            }
+        } else {
+            disableSelf()
+        }
     }
 
     private fun postReEnableNotification() {
         runCatching {
             val manager = getSystemService(NotificationManager::class.java) ?: return
+            // Normal/default importance so there is no jarring alarm sound while she enters a UPI PIN.
             val channel = NotificationChannel(
                 REENABLE_CHANNEL_ID,
-                "Saathi Screen Helper",
-                NotificationManager.IMPORTANCE_HIGH,
-            )
+                "Saathi Bank Safety",
+                NotificationManager.IMPORTANCE_DEFAULT,
+            ).apply {
+                setSound(null, null)
+                enableVibration(false)
+            }
             manager.createNotificationChannel(channel)
             val settingsIntent = AccessibilitySetupGuide.createSettingsIntent(this, newTask = true)
             val pending = PendingIntent.getActivity(
@@ -106,13 +121,24 @@ class SaathiAccessibilityService : AccessibilityService() {
                 settingsIntent,
                 PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
             )
-            val action = Notification.Action.Builder(null, Lines.ENABLE_ACCESSIBILITY_BUTTON, pending).build()
+            val mainIntent = Intent(this, MainActivity::class.java).apply {
+                // She lands on the bank-pause card, with its voice-only question and re-enable buttons.
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
+            val openAppPending = PendingIntent.getActivity(
+                this,
+                REENABLE_NOTIFICATION_ID + 1,
+                mainIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            )
+            val action = Notification.Action.Builder(null, Lines.BankPaused.BUTTON, pending).build()
             val notification = Notification.Builder(this, REENABLE_CHANNEL_ID)
                 .setSmallIcon(R.mipmap.ic_launcher)
-                .setContentTitle(Lines.ENABLE_ACCESSIBILITY_BUTTON)
+                .setContentTitle(Lines.REENABLE_NOTIFICATION_TITLE)
                 .setContentText(Lines.REENABLE_NOTIFICATION_TEXT)
-                .setContentIntent(pending)
-                .setOngoing(true)
+                .setStyle(Notification.BigTextStyle().bigText(Lines.REENABLE_NOTIFICATION_TEXT))
+                .setContentIntent(openAppPending)
+                .setOngoing(false)
                 .setAutoCancel(true)
                 .addAction(action)
                 .build()
@@ -146,6 +172,15 @@ class SaathiAccessibilityService : AccessibilityService() {
      * she installs later cannot get itself read by answering the same intents.
      */
     private fun addPhoneApps() {
+        val labelCache = java.util.concurrent.ConcurrentHashMap<String, String>()
+        Allowlist.appLabelResolver = { pkg ->
+            labelCache.getOrPut(pkg) {
+                runCatching {
+                    val info = packageManager.getApplicationInfo(pkg, 0)
+                    packageManager.getApplicationLabel(info).toString().trim()
+                }.getOrDefault("")
+            }.takeIf { it.isNotEmpty() }
+        }
         fun systemAppsFor(intent: Intent): Set<String> {
             @Suppress("DEPRECATION")
             val found = runCatching { packageManager.queryIntentActivities(intent, 0) }.getOrDefault(emptyList())
@@ -183,6 +218,7 @@ class SaathiAccessibilityService : AccessibilityService() {
      * and does not protect the active window, so this is what keeps other apps unread.
      */
     fun allowedRoot(): Pair<AccessibilityNodeInfo, String>? {
+        if (isDisablingForBank) return null
         val root = runCatching { rootInActiveWindow }.getOrNull() ?: return null
         val pkg = root.packageName?.toString() ?: return null
         if (Allowlist.isFinancialOrSecureApp(pkg)) return null
@@ -191,6 +227,10 @@ class SaathiAccessibilityService : AccessibilityService() {
 
     /** Takes a screenshot on Android 11+. Respects FLAG_SECURE windows so passwords/OTPs are never captured. */
     fun capture(onResult: (jpegBase64: String?, blocked: Boolean) -> Unit) {
+        if (isDisablingForBank) {
+            onResult(null, false)
+            return
+        }
         val active = activePackage()
         // Only apps that are always allowed and never financial/secure apps.
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R ||

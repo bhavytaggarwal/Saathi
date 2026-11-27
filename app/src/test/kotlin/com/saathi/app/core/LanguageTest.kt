@@ -68,7 +68,14 @@ class LanguageTest {
     @Test
     fun spokenLinesStayShort() {
         // Under 15 words, as for Hindi. Longer safety and payment lines are allowed a little more.
-        val longAllowed = setOf("getCHECKOUT_PAYMENT_STEP_OUT_SPEECH", "getCHECKOUT_PAYMENT_STEP_OUT", "scamWarning", "getSOUND_UNKNOWN")
+        val longAllowed = setOf(
+            "getCHECKOUT_PAYMENT_STEP_OUT_SPEECH",
+            "getCHECKOUT_PAYMENT_STEP_OUT",
+            "getBANK_STEP_OUT_SPEECH",
+            "getBANK_STEP_OUT",
+            "scamWarning",
+            "getSOUND_UNKNOWN",
+        )
         val tooLong = ArrayList<String>()
         for (language in ready) {
             Lang.current = language
@@ -184,5 +191,30 @@ class LanguageTest {
         Lang.current = Language.HINDI
         val hi = (AiReply.parse(json) as AiReply.Parsed.Ok).reply
         assertEquals("Upar se teesri line mein Bluetooth dabaiye.", hi.line.text)
+    }
+
+    @Test
+    fun prominentDisclosureCoversAllRequiredFactsInEveryReadyLanguage() {
+        for (language in ready) {
+            Lang.current = language
+            val title = Lines.Disclosure.TITLE
+            val body = Lines.Disclosure.BODY
+            val speech = Lines.Disclosure.SPEECH
+            val accept = Lines.Disclosure.ACCEPT_BUTTON
+            val decline = Lines.Disclosure.DECLINE_BUTTON
+            for (field in listOf(title, body, speech, accept, decline)) {
+                assertTrue("$language disclosure field blank", field.isNotBlank())
+                assertFalse("$language disclosure says tap or click: $field", tapOrClick.containsMatchIn(field))
+            }
+            assertTrue("$language body mentions AccessibilityService", body.contains("AccessibilityService"))
+            assertTrue("$language body mentions HTTPS", body.contains("HTTPS"))
+            assertTrue("$language body mentions OTP", body.contains("OTP"))
+            when (language) {
+                Language.HINDI -> assertTrue("Hindi disclosure in Devanagari", body.hasDevanagari() && accept.hasDevanagari() && decline.hasDevanagari())
+                Language.KANNADA -> assertTrue("Kannada disclosure in Kannada", body.hasKannada() && accept.hasKannada() && decline.hasKannada())
+                Language.ENGLISH -> assertFalse("English disclosure has no Indic script", body.hasDevanagari() || body.hasKannada())
+                else -> Unit
+            }
+        }
     }
 }

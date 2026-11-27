@@ -72,6 +72,26 @@ class MainActivity : Activity() {
         refreshers.forEach { it() }
     }
 
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        updateOnboardingStep(autoSpeak = true)
+        refreshers.forEach { it() }
+    }
+
+    fun showAccessibilityDisclosureFromInApp() {
+        prefs.accessibilityDeclined = false
+        prefs.onboardingCompleted = false
+        inAppAssistant?.shutdown()
+        inAppAssistant = null
+        if (::inAppAssistantContainer.isInitialized) {
+            inAppAssistantContainer.removeAllViews()
+            inAppAssistantContainer.visibility = View.GONE
+        }
+        updateOnboardingStep(autoSpeak = true)
+        refreshers.forEach { it() }
+        (stepperContainer.parent?.parent as? ScrollView)?.smoothScrollTo(0, 0)
+    }
+
     override fun onRequestPermissionsResult(
         requestCode: Int,
         permissions: Array<out String>,
@@ -165,6 +185,8 @@ class MainActivity : Activity() {
         if (hasAccessibility) {
             prefs.pausedForBanking = false
             prefs.onboardingCompleted = true
+            prefs.accessibilityDisclosureAccepted = true
+            prefs.accessibilityDeclined = false
             inAppAssistant?.shutdown()
             inAppAssistant = null
             if (::inAppAssistantContainer.isInitialized) {
@@ -176,9 +198,9 @@ class MainActivity : Activity() {
             // The language comes first, so every step after it is in her language.
             !prefs.languageChosen -> 0
             !hasMic -> 1
-            // Do not nag the user on app launch if Accessibility was disabled after onboarding or
-            // automatically stepped out for a strict banking app.
-            !hasAccessibility && !prefs.pausedForBanking && !prefs.onboardingCompleted -> 2
+            // Do not nag the user on app launch if Accessibility was disabled after onboarding,
+            // declined for voice-only mode, or automatically stepped out for a strict banking app.
+            !hasAccessibility && !prefs.pausedForBanking && !prefs.onboardingCompleted && !prefs.accessibilityDeclined -> 2
             else -> 3
         }
     }
@@ -200,6 +222,10 @@ class MainActivity : Activity() {
         currentStepIndex = step
         stepperContainer.removeAllViews()
 
+        if (!isServiceOn() && prefs.pausedForBanking) {
+            stepperContainer.addView(buildBankPausedBanner(), wrapWithGap(12))
+        }
+
         when (step) {
             0 -> stepperContainer.addView(buildLanguageCard())
             1 -> stepperContainer.addView(
@@ -214,20 +240,7 @@ class MainActivity : Activity() {
                     },
                 )
             )
-            2 -> stepperContainer.addView(
-                buildStepCard(
-                    stepNumber = Lines.Setup.step(2),
-                    iconText = "👆",
-                    headline = Lines.Setup.SCREEN_HEADLINE,
-                    spokenHindi = Lines.Setup.SCREEN_SPEECH,
-                    ctaLabel = Lines.ENABLE_ACCESSIBILITY_BUTTON,
-                    onCtaClick = {
-                        voice.speak(AccessibilitySetupGuide.spokenInstruction())
-                        startActivity(AccessibilitySetupGuide.createSettingsIntent(this@MainActivity))
-                    },
-                    extraFooter = if (shouldShowSideloadHelp()) buildSideloadRestrictedHelp() else null,
-                )
-            )
+            2 -> stepperContainer.addView(buildAccessibilityDisclosureCard())
             else -> stepperContainer.addView(
                 buildStepCard(
                     stepNumber = Lines.Setup.step(3),
@@ -247,6 +260,7 @@ class MainActivity : Activity() {
                             ensureInAppAssistant().onBubbleTap()
                         }
                     },
+                    extraFooter = if (!isServiceOn()) buildReviewScreenHelperFooter() else null,
                 )
             )
         }
@@ -256,7 +270,7 @@ class MainActivity : Activity() {
             val speech = when (step) {
                 0 -> Lines.Setup.CHOOSE_SPEECH
                 1 -> Lines.Setup.MIC_SPEECH
-                2 -> Lines.Setup.SCREEN_SPEECH
+                2 -> Lines.Disclosure.SPEECH
                 else -> Lines.Setup.START_SPEECH
             }
             stepperContainer.postDelayed({
@@ -428,6 +442,262 @@ class MainActivity : Activity() {
     }
 
     /**
+     * Step 2: Google Play Prominent Disclosure card for Android AccessibilityService API with
+     * full immediately-visible disclosure bullets and explicit Accept + Decline buttons.
+     */
+    private fun buildAccessibilityDisclosureCard(): View {
+        val card = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(dp(20), dp(22), dp(20), dp(22))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = 24f * resources.displayMetrics.density
+                setStroke(dp(2), 0xFFE8730C.toInt())
+            }
+        }
+
+        val topRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+        val stepBadge = TextView(this).apply {
+            text = Lines.Setup.step(2)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextColor(0xFF6A5D4D.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val replayBtn = TextView(this).apply {
+            text = Lines.Setup.REPLAY
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextColor(0xFF0F5E5C.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            setPadding(dp(12), dp(6), dp(12), dp(6))
+            background = GradientDrawable().apply {
+                setColor(0xFFEAF4F3.toInt())
+                cornerRadius = 16f * resources.displayMetrics.density
+            }
+            setOnClickListener { voice.speak(Lines.Disclosure.SPEECH) }
+        }
+        topRow.addView(stepBadge, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        topRow.addView(replayBtn)
+        card.addView(topRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
+
+        val iconView = TextView(this).apply {
+            text = "👆"
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 38f)
+            gravity = Gravity.CENTER
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(0xFFFFF3E0.toInt())
+                setStroke(dp(2), 0xFFE8730C.toInt())
+            }
+        }
+        val iconParams = LinearLayout.LayoutParams(dp(76), dp(76)).apply {
+            topMargin = dp(14)
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+        card.addView(iconView, iconParams)
+
+        val headlineView = TextView(this).apply {
+            text = Lines.Setup.SCREEN_HEADLINE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 22f)
+            setTextColor(0xFF1F1A14.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            gravity = Gravity.CENTER
+            setLineSpacing(0f, 1.15f)
+        }
+        card.addView(headlineView, wrapWithGap(14))
+
+        // Uncollapsed Prominent Disclosure box showing all 4 required Google Play disclosures.
+        val disclosureBox = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(12), dp(14), dp(12))
+            background = GradientDrawable().apply {
+                setColor(0xFFFFF8EF.toInt())
+                cornerRadius = 14f * resources.displayMetrics.density
+                setStroke(dp(1), 0xFFE0D5C7.toInt())
+            }
+        }
+        val disclosureTitle = TextView(this).apply {
+            text = Lines.Disclosure.TITLE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF0F5E5C.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val disclosureBody = TextView(this).apply {
+            text = Lines.Disclosure.BODY
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+            setTextColor(0xFF1F1A14.toInt())
+            setLineSpacing(0f, 1.25f)
+        }
+        disclosureBox.addView(disclosureTitle)
+        disclosureBox.addView(disclosureBody, wrapWithGap(6))
+        card.addView(disclosureBox, wrapWithGap(14))
+
+        // Primary Accept CTA
+        val acceptBtn = Button(this, null, 0, 0).apply {
+            text = Lines.Disclosure.ACCEPT_BUTTON
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+            typeface = Typeface.DEFAULT_BOLD
+            minimumHeight = dp(56)
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            background = GradientDrawable().apply {
+                setColor(0xFF0F5E5C.toInt())
+                cornerRadius = 28f * resources.displayMetrics.density
+            }
+            setOnClickListener {
+                prefs.accessibilityDisclosureAccepted = true
+                prefs.accessibilityDeclined = false
+                voice.speak(AccessibilitySetupGuide.spokenInstruction())
+                startActivity(AccessibilitySetupGuide.createSettingsIntent(this@MainActivity))
+            }
+        }
+        card.addView(acceptBtn, wrapWithGap(16))
+
+        // Secondary Decline CTA (advances cleanly to Step 3 voice-only mode)
+        val declineBtn = Button(this, null, 0, 0).apply {
+            text = Lines.Disclosure.DECLINE_BUTTON
+            isAllCaps = false
+            setTextColor(0xFF1F1A14.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
+            typeface = Typeface.DEFAULT_BOLD
+            minimumHeight = dp(50)
+            gravity = Gravity.CENTER
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            background = GradientDrawable().apply {
+                setColor(0xFFF3EFEA.toInt())
+                cornerRadius = 25f * resources.displayMetrics.density
+                setStroke(dp(1), 0xFFC8BEB2.toInt())
+            }
+            setOnClickListener {
+                prefs.accessibilityDeclined = true
+                prefs.onboardingCompleted = true
+                voice.stopSpeaking()
+                refreshers.forEach { it() }
+                updateOnboardingStep(autoSpeak = true)
+            }
+        }
+        card.addView(declineBtn, wrapWithGap(10))
+
+        if (shouldShowSideloadHelp()) {
+            card.addView(buildSideloadRestrictedHelp(), wrapWithGap(14))
+        }
+        return card
+    }
+
+    private fun buildReviewScreenHelperFooter(): View = TextView(this).apply {
+        text = "👆 " + Lines.Disclosure.REVIEW_CARD_BUTTON
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+        setTextColor(0xFF0F5E5C.toInt())
+        typeface = Typeface.DEFAULT_BOLD
+        gravity = Gravity.CENTER
+        setPadding(dp(12), dp(10), dp(12), dp(10))
+        background = GradientDrawable().apply {
+            setColor(0xFFEAF4F3.toInt())
+            cornerRadius = 20f * resources.displayMetrics.density
+        }
+        setOnClickListener { showAccessibilityDisclosureFromInApp() }
+    }
+
+    /**
+     * Shown at the top of MainActivity when AccessibilityService is off and paused_for_banking
+     * is true, explaining why Saathi turned itself off and providing a prominent 1-tap button to
+     * turn Saathi back on.
+     */
+    private fun buildBankPausedBanner(): View {
+        val banner = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(18), dp(18), dp(18), dp(18))
+            background = GradientDrawable().apply {
+                setColor(0xFFFFF8EF.toInt())
+                cornerRadius = 20f * resources.displayMetrics.density
+                setStroke(dp(2), 0xFF0F5E5C.toInt())
+            }
+        }
+        val titleView = TextView(this).apply {
+            text = Lines.BankPaused.TITLE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+            setTextColor(0xFF0F5E5C.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+        }
+        val bodyView = TextView(this).apply {
+            text = Lines.BankPaused.BODY
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF1F1A14.toInt())
+            setLineSpacing(0f, 1.25f)
+        }
+        val noteView = TextView(this).apply {
+            text = Lines.BankPaused.SAFETY_NOTE
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+            setTextColor(0xFF7A2E00.toInt())
+            typeface = Typeface.DEFAULT_BOLD
+            setLineSpacing(0f, 1.2f)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            background = GradientDrawable().apply {
+                setColor(0xFFFFE9D6.toInt())
+                cornerRadius = 14f * resources.displayMetrics.density
+            }
+        }
+        // Voice only: Accessibility stays off and no screen is attached. The in-app assistant has
+        // no service, so it cannot read any screen, and the turn goes as bank_text_help.
+        val askBtn = Button(this, null, 0, 0).apply {
+            text = Lines.BankPaused.ASK_BUTTON
+            isAllCaps = false
+            setTextColor(0xFF0F5E5C.toInt())
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+            typeface = Typeface.DEFAULT_BOLD
+            minimumHeight = dp(54)
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            background = GradientDrawable().apply {
+                setColor(Color.WHITE)
+                cornerRadius = 27f * resources.displayMetrics.density
+                setStroke(dp(2), 0xFF0F5E5C.toInt())
+            }
+            setOnClickListener {
+                voice.stopSpeaking()
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 1)
+                } else {
+                    ensureInAppAssistant().startBankVoiceHelp()
+                }
+            }
+        }
+        val reenableBtn = Button(this, null, 0, 0).apply {
+            text = Lines.BankPaused.REENABLE_BUTTON
+            isAllCaps = false
+            setTextColor(Color.WHITE)
+            setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
+            typeface = Typeface.DEFAULT_BOLD
+            minimumHeight = dp(54)
+            gravity = Gravity.CENTER
+            setPadding(dp(18), dp(12), dp(18), dp(12))
+            background = GradientDrawable().apply {
+                setColor(0xFF0F5E5C.toInt())
+                cornerRadius = 27f * resources.displayMetrics.density
+            }
+            setOnClickListener {
+                if (!prefs.accessibilityDisclosureAccepted) {
+                    showAccessibilityDisclosureFromInApp()
+                } else {
+                    voice.speak(AccessibilitySetupGuide.spokenInstruction())
+                    startActivity(AccessibilitySetupGuide.createSettingsIntent(this@MainActivity))
+                }
+            }
+        }
+        banner.addView(titleView)
+        banner.addView(bodyView, wrapWithGap(8))
+        banner.addView(noteView, wrapWithGap(12))
+        banner.addView(askBtn, wrapWithGap(14))
+        banner.addView(reenableBtn, wrapWithGap(10))
+        return banner
+    }
+
+    /**
      * Shown only on Android 13+ when the app was sideloaded (not installed from Google Play).
      */
     private fun shouldShowSideloadHelp(): Boolean {
@@ -502,6 +772,21 @@ class MainActivity : Activity() {
     }
 
     private fun buildAdvancedSettings(root: LinearLayout) {
+        root.addView(
+            step(
+                Lines.Disclosure.REVIEW_CARD_TITLE,
+                Lines.Disclosure.REVIEW_CARD_WHY,
+                Lines.Disclosure.REVIEW_CARD_BUTTON,
+                done = { isServiceOn() },
+            ) {
+                if (!prefs.accessibilityDisclosureAccepted) {
+                    showAccessibilityDisclosureFromInApp()
+                } else {
+                    voice.speak(AccessibilitySetupGuide.spokenInstruction())
+                    startActivity(AccessibilitySetupGuide.createSettingsIntent(this@MainActivity))
+                }
+            }
+        )
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             root.addView(
                 step("Notifications", "To show reminders.", "Allow", done = {
@@ -509,22 +794,33 @@ class MainActivity : Activity() {
                 }) { requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2) }
             )
         }
-        if (Build.VERSION.SDK_INT == Build.VERSION_CODES.S || Build.VERSION.SDK_INT == Build.VERSION_CODES.S_V2) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             root.addView(
                 step("Alarms and reminders", "So reminders fire at the exact time she asked.", "Allow", done = {
                     getSystemService(AlarmManager::class.java).canScheduleExactAlarms()
-                }) { startActivity(Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)) }
+                }) {
+                    startActivity(
+                        Intent(
+                            Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM,
+                            Uri.parse("package:$packageName"),
+                        )
+                    )
+                }
             )
         }
         root.addView(soundFinderCard())
 
         root.addView(heading("Stop the phone from killing Saathi"))
         root.addView(
-            step("Battery: Unrestricted", "Phone makers stop background apps to save battery, which would stop reminders and the character.", "Turn off optimisation", done = {
-                getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
-            }) {
-                @Suppress("BatteryLife")
-                startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+            step(
+                "Battery: Unrestricted",
+                "Phone makers stop background apps to save battery, which would stop reminders and the character. Open the battery list, find Saathi, and set it to Unrestricted (or Don't optimize).",
+                "Open battery settings",
+                done = {
+                    getSystemService(PowerManager::class.java).isIgnoringBatteryOptimizations(packageName)
+                },
+            ) {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
             }
         )
         val autoStart = autoStartIntents()
