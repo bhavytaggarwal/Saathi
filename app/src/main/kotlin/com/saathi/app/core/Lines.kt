@@ -28,9 +28,9 @@ object Lines {
 
     /** Spoken when a strict banking or UPI app launches directly and Saathi calls disableSelf(). */
     val BANK_STEP_OUT_SPEECH get() = s(
-        "Suraksha ke liye Saathi band kar diya hai. Ab back jaakar ek baar phir se app kholein.",
-        "For your safety, Saathi is now off. Go back and open the app again.",
-        "ಸುರಕ್ಷತೆಗಾಗಿ ಸಾಥಿ ಆಫ್ ಆಗಿದೆ. ಹಿಂದೆ ಹೋಗಿ ಆ್ಯಪ್ ಮತ್ತೆ ತೆರೆಯಿರಿ.",
+        "Bank ki suraksha ke liye main abhi band ho rahi hoon. Kuch poochhna ho ya kaam ke baad mujhe wapas chalu karna ho, toh Saathi app ya upar notification kholein.",
+        "For bank safety I'm off now. To ask or restart, open Saathi or its notification.",
+        "ಬ್ಯಾಂಕ್ ಸುರಕ್ಷತೆಗಾಗಿ ನಾನು ಆಫ್ ಆಗುತ್ತಿದ್ದೇನೆ. ಕೇಳಲು ಅಥವಾ ಮತ್ತೆ ಆನ್ ಮಾಡಲು ಸಾಥಿ ಆ್ಯಪ್ ಅಥವಾ ನೋಟಿಫಿಕೇಶನ್ ತೆರೆಯಿರಿ.",
     )
     val BANK_STEP_OUT get() = Line(BANK_STEP_OUT_SPEECH)
 
@@ -74,6 +74,15 @@ object Lines {
         Line("OTP kabhi kisi ko mat batana, mujhe bhi nahi.", "OTP कभी किसी को मत बताना, मुझे भी नहीं।"),
         "Never tell anyone your OTP, not even me.",
         "OTP ಯಾರಿಗೂ ಹೇಳಬೇಡಿ, ನನಗೂ ಹೇಳಬೇಡಿ.",
+    )
+    /** She started reading out an ID or credential. Said on the phone; nothing is sent. */
+    val SENSITIVE_DATA_WARNING get() = t(
+        Line(
+            "Ruko! Aadhaar, PIN ya password jaisi baatein mujhe ya kisi ko mat batana.",
+            "रुको! आधार, पिन या पासवर्ड जैसी बातें मुझे या किसी को मत बताना।",
+        ),
+        "Stop! Never tell me or anyone your Aadhaar, PIN or password.",
+        "ನಿಲ್ಲಿ! ಆಧಾರ್, ಪಿನ್ ಅಥವಾ ಪಾಸ್‌ವರ್ಡ್ ನನಗೂ ಯಾರಿಗೂ ಹೇಳಬೇಡಿ.",
     )
     val LISTEN_FAILED get() = t(
         Line("Mujhe sunai nahi diya. Bolo button dabakar phir se boliye.", "मुझे सुनाई नहीं दिया। बोलो button दबाकर फिर से बोलिए।"),
@@ -139,6 +148,12 @@ object Lines {
     )
     /** Said when the model's reply was invalid or timed out twice in a row. */
     val RETRY_FAILED get() = t(Line("Ek second, main phir se dekh rahi hoon.", "एक सेकंड, मैं फिर से देख रही हूँ।"), "One second, I'm looking again.", "ಒಂದು ಕ್ಷಣ, ಮತ್ತೆ ನೋಡುತ್ತಿದ್ದೇನೆ.")
+    /** Said once when an automatic step failed twice on the same page. Saathi then waits for her. */
+    val PAGE_UNCLEAR get() = t(
+        Line("Agla button saaf nahi dikh raha. Khud aage badhiye, ya madad ke liye mujhe dabaiye.", "अगला button साफ़ नहीं दिख रहा। खुद आगे बढ़िए, या मदद के लिए मुझे दबाइए।"),
+        "I can't see the next button clearly. Carry on yourself, or press me for help.",
+        "ಮುಂದಿನ ಬಟನ್ ಸ್ಪಷ್ಟವಾಗಿ ಕಾಣುತ್ತಿಲ್ಲ. ನೀವೇ ಮುಂದುವರಿಯಿರಿ, ಅಥವಾ ಸಹಾಯಕ್ಕೆ ನನ್ನನ್ನು ಒತ್ತಿ.",
+    )
     /** Asked before an ask-first app such as WhatsApp is read, with Haan and Nahi buttons. */
     val CONSENT get() = t(
         Line("WhatsApp ki screen dekhun? Sirf buttons dekhungi, messages nahi.", "WhatsApp की screen देखूँ? सिर्फ़ buttons देखूँगी, messages नहीं।"),
@@ -170,10 +185,15 @@ object Lines {
     )
 
     val REMINDER_NOTIFICATION_TITLE get() = s("Saathi: yaad dila rahi hoon", "Saathi reminder", "ಸಾಥಿ: ನೆನಪಿಸುತ್ತಿದ್ದೇನೆ")
+    val REENABLE_NOTIFICATION_TITLE get() = s(
+        "Bank suraksha ke liye Saathi ruka hai",
+        "Saathi paused for bank safety",
+        "ಬ್ಯಾಂಕ್ ಸುರಕ್ಷತೆಗಾಗಿ ಸಾಥಿ ನಿಂತಿದೆ",
+    )
     val REENABLE_NOTIFICATION_TEXT get() = s(
-        "Payment ke baad yahan dabakar Saathi wapas chalu karein",
-        "After paying, press here to turn Saathi back on",
-        "ಪಾವತಿಯ ನಂತರ ಇಲ್ಲಿ ಒತ್ತಿ ಸಾಥಿ ಮತ್ತೆ ಆನ್ ಮಾಡಿ",
+        "Bank ka sawaal poochhna ho ya Saathi wapas chalu karna ho, toh yahan dabaiye.",
+        "Press here to ask a bank question, or to turn Saathi back on.",
+        "ಬ್ಯಾಂಕ್ ಪ್ರಶ್ನೆಯನ್ನು ಸುರಕ್ಷಿತವಾಗಿ ಕೇಳಲು, ಅಥವಾ ಬ್ಯಾಂಕ್ ಕೆಲಸದ ನಂತರ ಸಾಥಿಯನ್ನು ಮತ್ತೆ ಆನ್ ಮಾಡಲು ಇಲ್ಲಿ ಒತ್ತಿ.",
     )
 
     // Buttons on the panel.
@@ -341,5 +361,100 @@ object Lines {
         val START_SPEECH get() = s("शुरू करें! पूछिए: शॉपिंग लिस्ट पढ़ो।", "Let's start! Ask me to read your shopping list.", "ಶುರು ಮಾಡೋಣ! ಶಾಪಿಂಗ್ ಪಟ್ಟಿ ಓದು ಎಂದು ಕೇಳಿ.")
         val START_BUTTON get() = s("Shuru karein", "Start", "ಶುರು ಮಾಡಿ")
         val CHANGE_LANGUAGE get() = s("🌐 Bhasha badlein", "🌐 Change language", "🌐 ಭಾಷೆ ಬದಲಿಸಿ")
+    }
+
+    /**
+     * Google Play Prominent Disclosure for Android AccessibilityService API, with explicit
+     * Accept and Decline paths in all ready languages.
+     */
+    object Disclosure {
+        val TITLE get() = s(
+            "AccessibilityService अनुमति की जानकारी",
+            "AccessibilityService Permission Disclosure",
+            "AccessibilityService ಅನುಮತಿ ಮಾಹಿತಿ",
+        )
+        val BODY get() = s(
+            "• Saathi स्क्रीन पर मार्गदर्शन के लिए Android AccessibilityService API का उपयोग करता है।\n" +
+                "• जब आप स्क्रीन पर मदद माँगते हैं, यह अनुमति प्राप्त ऐप्स में स्क्रीन का टेक्स्ट, बटन के नाम व स्थान, और ज़रूरत पड़ने पर मास्क किए गए स्क्रीनशॉट पढ़ता है।\n" +
+                "• सभी नंबर, राशि, ईमेल और UPI ID हटाकर (मास्क करके) एन्क्रिप्टेड HTTPS द्वारा Saathi की Google Cloud AI सेवा को केवल अगला बटन दिखाने और बोलकर समझाने के लिए भेजे जाते हैं—इन्हें कभी सेव, लॉग या बेचा नहीं जाता, और Saathi कभी आपकी ओर से कोई बटन नहीं दबाता।\n" +
+                "• पासवर्ड, PIN, OTP, SMS, Gmail और बैंकिंग ऐप्स कभी नहीं पढ़े जाते।",
+            "• Saathi uses the Android AccessibilityService API to guide you on screen.\n" +
+                "• When you ask for screen help, it reads on-screen text, button labels and positions, and occasional masked screenshots of allowed apps.\n" +
+                "• Numbers, amounts, emails, and UPI IDs are masked and sent over encrypted HTTPS to Saathi's Google Cloud AI service solely to point at the next button and speak instructions—never stored, logged, or sold, and Saathi never acts or presses buttons on your behalf.\n" +
+                "• Passwords, PINs, OTPs, SMS, Gmail, and banking apps are never read.",
+            "• ಪರದೆಯ ಮೇಲೆ ಮಾರ್ಗದರ್ಶನ ನೀಡಲು ಸಾಥಿ Android AccessibilityService API ಬಳಸುತ್ತದೆ.\n" +
+                "• ನೀವು ಪರದೆಯ ಸಹಾಯ ಕೇಳಿದಾಗ, ಅನುಮತಿಸಲಾದ ಆ್ಯಪ್‌ಗಳ ಪಠ್ಯ, ಬಟನ್ ಹೆಸರು ಹಾಗೂ ಸ್ಥಾನ, ಮತ್ತು ಅಗತ್ಯವಿದ್ದಾಗ ಮಾಸ್ಕ್ ಮಾಡಿದ ಸ್ಕ್ರೀನ್‌ಶಾಟ್‌ಗಳನ್ನು ಇದು ಓದುತ್ತದೆ.\n" +
+                "• ಸಂಖ್ಯೆಗಳು, ಮೊತ್ತ, ಇಮೇಲ್ ಮತ್ತು UPI ID ಗಳನ್ನು ಮರೆಮಾಡಿ (ಮಾಸ್ಕ್ ಮಾಡಿ), ಮುಂದಿನ ಬಟನ್ ತೋರಿಸಲು ಮತ್ತು ಧ್ವನಿಯಲ್ಲಿ ಹೇಳಲು ಮಾತ್ರ ಎನ್‌ಕ್ರಿಪ್ಟೆಡ್ HTTPS ಮೂಲಕ ಸಾಥಿಯ Google Cloud AI ಸೇವೆಗೆ ಕಳುಹಿಸಲಾಗುತ್ತದೆ—ಇದನ್ನು ಎಂದಿಗೂ ಸಂಗ್ರಹಿಸುವುದಿಲ್ಲ ಅಥವಾ ಮಾರಾಟ ಮಾಡುವುದಿಲ್ಲ, ಹಾಗೂ ಸಾಥಿ ನಿಮ್ಮ ಪರವಾಗಿ ಯಾವುದೇ ಬಟನ್ ಒತ್ತುವುದಿಲ್ಲ.\n" +
+                "• ಪಾಸ್‌ವರ್ಡ್, PIN, OTP, SMS, Gmail ಮತ್ತು ಬ್ಯಾಂಕಿಂಗ್ ಆ್ಯಪ್‌ಗಳನ್ನು ಎಂದಿಗೂ ಓದುವುದಿಲ್ಲ.",
+        )
+        val SPEECH get() = s(
+            "साथी आपको अगला बटन दिखाने के लिए Android AccessibilityService का उपयोग करता है। पासवर्ड, ओटीपी और बैंकिंग ऐप्स कभी नहीं पढ़े जाते, और साथी खुद कोई बटन नहीं दबाता। स्क्रीन मदद चालू करने के लिए स्वीकार करें दबाइए, या सिर्फ़ आवाज़ से मदद के लिए अभी नहीं दबाइए।",
+            "Saathi uses the Android AccessibilityService to point at buttons on your screen. Passwords, OTPs, and banking apps are never read, and Saathi never presses buttons for you. Press Agree to open Settings, or press Decline to use voice only.",
+            "ಪರದೆಯ ಮೇಲೆ ಬಟನ್ ತೋರಿಸಲು ಸಾಥಿ Android AccessibilityService ಬಳಸುತ್ತದೆ. ಪಾಸ್‌ವರ್ಡ್, OTP ಮತ್ತು ಬ್ಯಾಂಕಿಂಗ್ ಆ್ಯಪ್‌ಗಳನ್ನು ಎಂದಿಗೂ ಓದುವುದಿಲ್ಲ, ಹಾಗೂ ಸಾಥಿ ತಾನಾಗಿಯೇ ಬಟನ್ ಒತ್ತುವುದಿಲ್ಲ. ಸೆಟ್ಟಿಂಗ್ಸ್ ತೆರೆಯಲು ಒಪ್ಪಿಗೆ ಒತ್ತಿ, ಅಥವಾ ಧ್ವನಿ ಮಾತ್ರ ಬಳಸಲು ಬೇಡ ಒತ್ತಿ.",
+        )
+        val ACCEPT_BUTTON get() = s(
+            "स्वीकार करें और सेटिंग्स खोलें",
+            "Agree & Open Settings",
+            "ಒಪ್ಪುತ್ತೇನೆ ಮತ್ತು ಸೆಟ್ಟಿಂಗ್ಸ್ ತೆರೆಯಿರಿ",
+        )
+        val DECLINE_BUTTON get() = s(
+            "अभी नहीं (सिर्फ़ आवाज़ से मदद)",
+            "Decline (Use voice only)",
+            "ಈಗ ಬೇಡ (ಧ್ವನಿ ಸಹಾಯ ಮಾತ್ರ)",
+        )
+        val REVIEW_CARD_TITLE get() = s(
+            "स्क्रीन मदद (AccessibilityService)",
+            "Screen Helper (AccessibilityService)",
+            "ಪರದೆ ಸಹಾಯ (AccessibilityService)",
+        )
+        val REVIEW_CARD_WHY get() = s(
+            "स्क्रीन पर बटन दिखाने के लिए AccessibilityService जानकारी पढ़ें और चालू करें।",
+            "Review the AccessibilityService disclosure and turn on live screen guidance.",
+            "ಪರದೆಯ ಮೇಲೆ ಬಟನ್ ತೋರಿಸಲು AccessibilityService ಮಾಹಿತಿ ಓದಿ ಮತ್ತು ಆನ್ ಮಾಡಿ.",
+        )
+        val REVIEW_CARD_BUTTON get() = s(
+            "स्क्रीन मदद चालू करें",
+            "Review & Turn on Screen Helper",
+            "ಪರದೆ ಸಹಾಯ ಆನ್ ಮಾಡಿ",
+        )
+    }
+
+    /**
+     * Banner shown at the top of MainActivity when AccessibilityService is off and
+     * paused_for_banking == true, giving the user a 1-tap button to turn Saathi back on.
+     */
+    object BankPaused {
+        val TITLE get() = s(
+            "🔒 बैंक की सुरक्षा के लिए Saathi बंद हुआ था",
+            "🔒 Saathi turned off for bank safety",
+            "🔒 ಬ್ಯಾಂಕ್ ಸುರಕ್ಷತೆಗಾಗಿ ಸಾಥಿ ಆಫ್ ಆಗಿತ್ತು",
+        )
+        val BODY get() = s(
+            "आपकी बैंक स्क्रीन प्राइवेट रहे, इसलिए Saathi थोड़ी देर के लिए बाहर आ गया। बैंक का सवाल बिना स्क्रीन देखे पूछ सकती हैं, या काम पूरा होने पर Saathi वापस चालू कर लीजिए।",
+            "Saathi stepped out to keep your bank screen private. You can ask a banking question without Saathi seeing the screen, or turn Saathi back on when your bank work is done.",
+            "ನಿಮ್ಮ ಬ್ಯಾಂಕ್ ಪರದೆ ಖಾಸಗಿಯಾಗಿರಲು ಸಾಥಿ ಸ್ವಲ್ಪ ಹೊತ್ತು ಹೊರಗೆ ಬಂದಿದೆ. ಪರದೆ ನೋಡದೆ ಬ್ಯಾಂಕ್ ಪ್ರಶ್ನೆ ಕೇಳಬಹುದು, ಅಥವಾ ಕೆಲಸ ಮುಗಿದ ಮೇಲೆ ಸಾಥಿಯನ್ನು ಮತ್ತೆ ಆನ್ ಮಾಡಿ.",
+        )
+        /** The fake customer-care number scam: search ads and video comments carry fake helplines. */
+        val SAFETY_NOTE get() = s(
+            "सावधान: Google या YouTube पर customer care नंबर कभी मत ढूँढें — सिर्फ़ अपने ATM card या passbook के पीछे छपे नंबर पर call करें।",
+            "Careful: never search Google or YouTube for a customer care number. Call only the number printed on the back of your ATM card or passbook.",
+            "ಎಚ್ಚರಿಕೆ: Google ಅಥವಾ YouTube ನಲ್ಲಿ ಕಸ್ಟಮರ್ ಕೇರ್ ನಂಬರ್ ಎಂದೂ ಹುಡುಕಬೇಡಿ. ನಿಮ್ಮ ATM ಕಾರ್ಡ್ ಅಥವಾ ಪಾಸ್‌ಬುಕ್ ಹಿಂದೆ ಮುದ್ರಿಸಿದ ನಂಬರ್‌ಗೆ ಮಾತ್ರ ಕರೆ ಮಾಡಿ.",
+        )
+        /** Asks a banking question by voice in the app, with screen reading still off. */
+        val ASK_BUTTON get() = s(
+            "🎙️ Bina Screen Dekhe Poochhein",
+            "🎙️ Ask without showing the screen",
+            "🎙️ ಪರದೆ ತೋರಿಸದೆ ಕೇಳಿ",
+        )
+        val REENABLE_BUTTON get() = s(
+            "Bank Kaam Ho Gaya — Saathi Wapas Chalu Karein",
+            "Bank work done — turn Saathi back on",
+            "ಬ್ಯಾಂಕ್ ಕೆಲಸ ಮುಗಿಯಿತು — ಸಾಥಿ ಮತ್ತೆ ಆನ್ ಮಾಡಿ",
+        )
+        val BUTTON get() = s(
+            "Saathi Wapas Chalu Karein",
+            "Turn Saathi Back On",
+            "ಸಾಥಿ ಮತ್ತೆ ಆನ್ ಮಾಡಿ",
+        )
     }
 }

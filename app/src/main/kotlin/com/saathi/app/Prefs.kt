@@ -26,10 +26,6 @@ class Prefs(context: Context) {
             .joinToString("") { "%02x".format(it) }
     }
 
-    var model: String
-        get() = prefs.getString("model", null)?.takeIf { it.isNotBlank() } ?: DEFAULT_MODEL
-        set(value) = prefs.edit().putString("model", value.trim()).apply()
-
     /** Saathi's language. Chosen first in setup. Reading it also makes it the one in use. */
     var language: Language
         get() = Language.fromCode(prefs.getString("language", null)).also { Lang.current = it }
@@ -96,6 +92,16 @@ class Prefs(context: Context) {
         get() = prefs.getBoolean("onboarding_completed", false)
         set(value) = prefs.edit().putBoolean("onboarding_completed", value).apply()
 
+    /** True once the user has explicitly accepted the AccessibilityService Prominent Disclosure. */
+    var accessibilityDisclosureAccepted: Boolean
+        get() = prefs.getBoolean("accessibility_disclosure_accepted", false)
+        set(value) = prefs.edit().putBoolean("accessibility_disclosure_accepted", value).apply()
+
+    /** True when the user declined Accessibility during onboarding to use voice-only mode. */
+    var accessibilityDeclined: Boolean
+        get() = prefs.getBoolean("accessibility_declined", false)
+        set(value) = prefs.edit().putBoolean("accessibility_declined", value).apply()
+
     var bubbleX: Int
         get() = prefs.getInt("bubble_x", -1)
         set(value) = prefs.edit().putInt("bubble_x", value).apply()
@@ -119,7 +125,6 @@ class Prefs(context: Context) {
     }
 
     companion object {
-        const val DEFAULT_MODEL = "gemini-3.6-flash"
         const val DEFAULT_RATE = 0.85f
     }
 }

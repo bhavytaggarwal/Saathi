@@ -260,16 +260,25 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
     }
 
     /**
-     * Speaks one final line (such as the banking step-out reassurance) and shuts down the TTS
-     * engine as soon as the utterance completes, surviving AccessibilityService.disableSelf().
+     * Speaks one final line (such as the banking step-out reassurance) and invokes [onFinished]
+     * (e.g. AccessibilityService.disableSelf()) only after UtteranceProgressListener.onDone /
+     * onError fires or the hard 4500ms fallback timeout elapses, so onDestroy() never cuts off TTS.
      */
-    fun speakAndShutdown(speech: String) {
+    fun speakAndShutdown(speech: String, onFinished: (() -> Unit)? = null) {
         stopListening()
-        val fallbackShutdown = Runnable { shutdown() }
+        var completed = false
+        val complete = {
+            if (!completed) {
+                completed = true
+                shutdown()
+                onFinished?.invoke()
+            }
+        }
+        val fallbackShutdown = Runnable { complete() }
         main.postDelayed(fallbackShutdown, FINAL_SPEECH_TIMEOUT_MS)
         speak(speech) {
             main.removeCallbacks(fallbackShutdown)
-            shutdown()
+            complete()
         }
     }
 
@@ -573,7 +582,7 @@ class VoiceIO(context: Context, private val prefs: Prefs) {
         const val MAX_SPEECH_MS = 25_000L
         const val RETRY_MS = 400L
         const val TTS_DONE_DELAY_MS = ListenPolicy.ECHO_GAP_MS
-        const val FINAL_SPEECH_TIMEOUT_MS = 15_000L
+        const val FINAL_SPEECH_TIMEOUT_MS = 4_500L
         const val ERROR_LANGUAGE_NOT_SUPPORTED = 12
         const val ERROR_LANGUAGE_UNAVAILABLE = 13
     }

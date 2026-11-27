@@ -10,6 +10,7 @@ import com.saathi.app.core.ControlsScreen
 import com.saathi.app.core.NodeFacts
 import com.saathi.app.core.PrivacyFilter
 import com.saathi.app.core.ScrollRows
+import com.saathi.app.core.TurnPolicy
 import java.util.IdentityHashMap
 
 data class ScreenElement(
@@ -168,14 +169,14 @@ object ScreenReader {
         val facts = raw.map { it.facts }
         val scam = PrivacyFilter.isScamScreen(facts)
         val checkoutPayment = PrivacyFilter.isCheckoutPaymentOptionsScreen(facts, pkg)
-        val payment = checkoutPayment || (!Allowlist.isShoppingApp(pkg) && PrivacyFilter.isPaymentScreen(facts))
+        val payment = checkoutPayment || (Allowlist.isAskFirst(pkg) && PrivacyFilter.isPaymentScreen(facts))
         val reason = PrivacyFilter.secretReason(
             facts,
             numberPadMeansSecret = !Allowlist.hasOrdinaryNumberPad(pkg),
             ignoreRowText = Allowlist.isAskFirst(pkg),
         )
         val named = raw.count { it.tappable && !(it.facts.text ?: it.facts.description).isNullOrBlank() }
-        return PrivacyCheck(reason, payment, (payment || Allowlist.isShoppingApp(pkg)) && scam, named, checkoutPayment)
+        return PrivacyCheck(reason, payment, scam, named, checkoutPayment)
     }
 
     private fun hasSecret(facts: List<NodeFacts>, pkg: String) =
@@ -197,7 +198,7 @@ object ScreenReader {
         if (checkoutPayment) {
             return ScreenSnapshot(pkg, false, true, scam, emptyList(), false, checkoutPayment = true)
         }
-        val payment = !Allowlist.isShoppingApp(pkg) && PrivacyFilter.isPaymentScreen(facts)
+        val payment = Allowlist.isAskFirst(pkg) && PrivacyFilter.isPaymentScreen(facts)
         if (payment) return ScreenSnapshot(pkg, false, true, scam, emptyList(), false)
         // Decided by the app, not the caller, so an ask-first app can never be read in full.
         if (Allowlist.isAskFirst(pkg)) return readControlsOnly(raw, pkg, scam)
@@ -293,10 +294,15 @@ object ScreenReader {
             "progressbar" in cls || "circularprogress" in cls || "shimmer" in cls || "skeleton" in cls
         }
         val meaningfulTextCount = raw.count { resolvedLabels[it] != null }
-        // Smart Screenshot Policy: DOM-only for known clean, text-heavy packages (Settings, Play
-        // Store, WhatsApp, Contacts, Phone/Dialer, Launchers); attach 540px JPEG-60 screenshot for
-        // all other allowed apps (shopping, media, unfamiliar apps like Flipkart/Swiggy/Myntra).
-        val needsScreenshot = !Allowlist.isDomOnlyApp(pkg)
+        // Smart Screenshot Policy, DOM first: DOM-only apps (Settings, Play Store, WhatsApp,
+        // Contacts, Dialer, launchers) never send one routinely. Other apps send a 540px JPEG only
+        // when the element list is too thin to guide from (see TurnPolicy.needsScreenshot).
+        // Reprompts and low-confidence replies still escalate with a picture in Assistant.
+        val needsScreenshot = TurnPolicy.needsScreenshot(
+            Allowlist.isDomOnlyApp(pkg),
+            elements.filter { it.tappable }.map { it.label },
+            hasWebView = raw.any { "webview" in it.className.lowercase() },
+        )
         return ScreenSnapshot(
             pkg = pkg,
             secret = false,

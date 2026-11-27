@@ -18,6 +18,7 @@ import android.view.ViewGroup
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
+import com.saathi.app.core.AutoStall
 import com.saathi.app.core.AiReply
 import com.saathi.app.core.Allowlist
 import com.saathi.app.core.Box
@@ -43,6 +44,7 @@ import com.saathi.app.core.PrivacyFilter
 import com.saathi.app.core.ReplyAction
 import com.saathi.app.core.ScreenFacts
 import com.saathi.app.core.SessionState
+import com.saathi.app.core.TurnPolicy
 import org.json.JSONObject
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -136,6 +138,12 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     // Limits automatic follow-up calls, so an odd reply cannot loop and spend money.
     private var followUps = 0
 
+    // Voice-only banking help from the bank-pause card in the app: no screen and no guide, ever.
+    private var bankVoiceOnly = false
+
+    // Stops automatic steps looping on a page Saathi cannot read well (often a WebView).
+    private val autoStall = AutoStall()
+
     // Screenshots are skipped for a screen that has already refused one.
     private var screenshotRefusedFor: Set<String>? = null
 
@@ -155,7 +163,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
 
     private class Exchange(val her: String?, val saathi: String)
 
-    /** A goal that points at the screen. Only these send the screen list. */
+    /** A goal that points at the screen. These send the screen list, as does a first how/where question (see sendTurn). */
     private val guiding: Boolean
         get() = state.goal?.let { it.status == SessionState.ACTIVE && it.kind in SessionState.GUIDED_KINDS } == true
 
@@ -256,12 +264,17 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
 
     /**
      * Automatic Bank Mode step-out for strict Indian banking apps (YONO SBI, HDFC, ICICI, Axis,
-     * Kotak, bob World, PNB One) before [SaathiAccessibilityService.disableSelf] is called:
-     * 1. Immediately hides and removes all floating overlays.
+     * Kotak, bob World, PNB One, GPay, PhonePe, Paytm):
+     * 1. Immediately hides and removes all floating overlays and stops reading the screen.
      * 2. Saves pausedForBanking = true in SharedPreferences.
-     * 3. Speaks a calm Hindi reassurance via TTS that finishes cleanly after disableSelf().
+     * 3. Speaks a calm reassurance in the user's selected language and waits for TTS onDone/onError
+     *    (or a hard 4500ms fallback timeout) BEFORE invoking [onReadyToDisable] (disableSelf()).
      */
-    fun stepOutForStrictBankApp(pkg: String, speech: String = Lines.BANK_STEP_OUT_SPEECH) {
+    fun stepOutForStrictBankApp(
+        pkg: String,
+        speech: String = Lines.BANK_STEP_OUT_SPEECH,
+        onReadyToDisable: (() -> Unit)? = null,
+    ) {
         steppingOutForBanking = true
         prefs.pausedForBanking = true
         generation++
@@ -273,8 +286,22 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         overlay.hideAll()
         overlay.detach()
         Log.i(TAG, "bank_mode=step_out pkg=$pkg pausedForBanking=true")
-        voice.speakAndShutdown(speech)
+        voice.speakAndShutdown(speech, onReadyToDisable)
     }
+
+    /**
+     * "Bina Screen Dekhe Poochhein" on the bank-pause card. Screen reading stays off; her question
+     * goes as bank_text_help, so the backend answers it under the banking rules, and any reply
+     * that wants to guide on screen is spoken as words only.
+     */
+    fun startBankVoiceHelp() {
+        bankVoiceOnly = true
+        if (!sessionActive) startSession()
+        state.goal = bankVoiceGoal()
+        onListenTapped()
+    }
+
+    private fun bankVoiceGoal() = Goal(text = BANK_VOICE_GOAL, kind = "bank_text_help")
 
     fun isAccessibilityEnabled(): Boolean {
         if (service != null) {
@@ -354,7 +381,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
             scanNow()
             if (sessionActive && guiding && Allowlist.isAllowed(pkg)) {
                 main.removeCallbacks(settle)
-                main.postDelayed(settle, SETTLE_MS)
+                main.postDelayed(settle, TurnPolicy.settleMs(clickedSinceSettle))
             }
             return
         }
@@ -380,7 +407,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         if (sessionActive && guiding) {
             if (type == AccessibilityEvent.TYPE_VIEW_CLICKED) clickedSinceSettle = true
             main.removeCallbacks(settle)
-            main.postDelayed(settle, SETTLE_MS)
+            main.postDelayed(settle, TurnPolicy.settleMs(clickedSinceSettle))
         }
     }
 
@@ -482,9 +509,10 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         } else if (secretOnScreen || paymentOnScreen) {
             // Nothing is said while hidden, so this is how she comes back when the screen clears.
             scanNow()
-        } else if (Allowlist.isShoppingApp(active) && now() - lastScanAt >= SCAN_GAP_MS) {
-            // Shopping apps (Flipkart, Amazon, Swiggy) often render Payment Options inside a WebView
-            // without firing a new Activity state change. Poll scanNow() so we proactively step out.
+        } else if (!Allowlist.isDomOnlyApp(active) && Allowlist.isAllowed(active) && now() - lastScanAt >= SCAN_GAP_MS) {
+            // Consumer apps (Flipkart, Amazon, Swiggy, Meesho, JioMart, etc.) often render Payment
+            // Options inside a WebView without firing a new Activity state change. Poll scanNow() so
+            // we proactively step out on any app's checkout payment screen.
             scanNow()
         }
     }
@@ -755,6 +783,8 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     private fun endSession() {
         if (!sessionActive) return
         sessionActive = false
+        // The next session from the app's own Start button is ordinary voice help again.
+        bankVoiceOnly = false
         followUpOpen = false
         expectingAnswer = false
         revokeAccess("session_ended")
@@ -1004,6 +1034,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     // Understanding what she said
 
     private fun handleUtterance(raw: String) {
+        autoStall.reset()
         touchIdle()
         followUps = 0
         val filtered = PrivacyFilter.filterSpeech(raw)
@@ -1020,6 +1051,13 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         if (filtered.warn) {
             evalLog.writeLocal(filtered.text, "otp_warning")
             say(Lines.OTP_WARNING)
+            return
+        }
+        // Reading out an Aadhaar, PAN, account or card number, CVV, password or PIN: warned on the
+        // phone in under 50 ms, and nothing is sent. How-to questions about them go on normally.
+        if (PrivacyFilter.isSharingSensitiveData(raw)) {
+            evalLog.writeLocal(filtered.text, "sensitive_data_warning")
+            say(Lines.SENSITIVE_DATA_WARNING)
             return
         }
         access.touch(now())
@@ -1334,7 +1372,8 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
 
     /**
      * Sends one turn. words is null for an automatic step after the screen changed. The screen
-     * list goes only with a guided goal on a readable screen, and never from a payment screen.
+     * list goes only with a guided goal, or a first how/where question about the phone, on a
+     * readable screen, and never from a payment screen.
      * invalidReason is set on the single retry after a reply that broke the contract.
      */
     private fun sendTurn(
@@ -1347,13 +1386,20 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         if (!sessionActive) return
         val now = now()
         expireIfStale(now)
+        if (bankVoiceOnly && state.goal?.kind != "bank_text_help") state.goal = bankVoiceGoal()
         // A guided goal in an ask-first app waits for her answer before anything is read.
         if (guiding && !secretOnScreen && access.needsAsking(currentPkg, now)) {
             askConsent(words)
             return
         }
         var snapshot: ScreenSnapshot? = null
-        if (guiding && canReadNow()) {
+        // A first "kaise / kahan" question about the phone carries the screen at once, so Saathi
+        // points in one call instead of asking for the screen in a second one. Same reading and
+        // the same payment, secret and scam checks as a guided turn; never in an ask-first app.
+        val screenOnFirstTurn = !guiding && words != null && invalidReason == null &&
+            isAccessibilityEnabled() && canReadNow() && !Allowlist.isAskFirst(currentPkg) &&
+            TurnPolicy.isScreenHelpQuestion(words)
+        if ((guiding || screenOnFirstTurn) && canReadNow()) {
             val allowed = service?.allowedRoot()
             if (allowed != null) {
                 val read = readScreen(allowed)
@@ -1423,22 +1469,23 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         val sent = snapshot
 
         val gen = beginRequest()
+        val timeoutMs = TurnPolicy.llmTimeoutMs(words, hasScreen = sent != null)
         val timeoutRunnable = Runnable {
             if (gen == generation && awaitingReply) {
-                Log.w(TAG, "LLM call timed out after ${LLM_TIMEOUT_MS}ms (retried=$retried)")
+                Log.w(TAG, "LLM call timed out after ${timeoutMs}ms (retried=$retried)")
                 generation++
                 gemini.cancel()
                 finishRequest()
                 if (!retried) {
                     sendTurn(words, note, invalidReason, retried = true, forceScreenshot = attachScreenshotForEscalation)
                 } else {
-                    say(Lines.RETRY_FAILED)
+                    turnFailed(words)
                 }
             }
         }
         activeTimeoutRunnable?.let(main::removeCallbacks)
         activeTimeoutRunnable = timeoutRunnable
-        main.postDelayed(timeoutRunnable, LLM_TIMEOUT_MS)
+        main.postDelayed(timeoutRunnable, timeoutMs)
 
         // Smart Screenshot Policy:
         // - Routine turns in DOM_ONLY_PACKAGES (Settings, Play Store, WhatsApp, Contacts, Dialer,
@@ -1513,6 +1560,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         appendLine("Current time: " + SimpleDateFormat("EEEE yyyy-MM-dd HH:mm", Locale.ENGLISH).format(Date()))
         currentPkg?.takeIf { it.isNotBlank() }?.let { appendLine("Active package: $it") }
         appendLine("Her language: ${Lang.current.englishName}")
+        if (bankVoiceOnly) appendLine("Mode: voice-only banking help. Saathi is off for bank safety and sees no screen.")
         if (prefs.herName.isNotBlank()) appendLine("Her name: ${prefs.herName}")
         if (prefs.sonName.isNotBlank()) appendLine("Her son's name: ${prefs.sonName}")
         val learned = prefs.learnedTasks().entries.sortedByDescending { it.value }.take(8)
@@ -1575,13 +1623,11 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
                     sendTurn(words, note, invalidReason = reason, retried = true)
                     return
                 }
-                say(
-                    when (result.failure) {
-                        GeminiClient.Failure.BAD_KEY -> Lines.NO_KEY
-                        GeminiClient.Failure.NO_CREDIT -> Lines.NO_CREDIT
-                        else -> Lines.RETRY_FAILED
-                    }
-                )
+                when (result.failure) {
+                    GeminiClient.Failure.BAD_KEY -> say(Lines.NO_KEY)
+                    GeminiClient.Failure.NO_CREDIT -> say(Lines.NO_CREDIT)
+                    else -> turnFailed(words)
+                }
             }
             is GeminiClient.Result.Ok -> {
                 lastTraceId = result.traceId ?: "cloud_${now()}"
@@ -1591,7 +1637,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
                     intent = result.reply.intent, tokensIn = result.tokensIn, tokensOut = result.tokensOut,
                 )
                 if (problem != null) {
-                    if (!retried) sendTurn(words, note, invalidReason = problem) else say(Lines.RETRY_FAILED)
+                    if (!retried) sendTurn(words, note, invalidReason = problem) else turnFailed(words)
                     return
                 }
                 handleReply(result.reply, words, snapshot)
@@ -1676,6 +1722,13 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
 
         when (reply.intent) {
             "guide_step", "alarm_teach" -> {
+                if (bankVoiceOnly) {
+                    // Saathi cannot see the bank screen: words only, and never a request to turn
+                    // screen reading on inside a banking app.
+                    stopPointing()
+                    sayThenListen(reply.line.takeIf { it.text.isNotBlank() } ?: Lines.CANNOT_SEE)
+                    return
+                }
                 if (!guiding) {
                     val kind = if (reply.intent == "alarm_teach") "alarm_teach" else "guide"
                     startGoal(Goal(text = state.goal?.text?.ifBlank { null } ?: question.ifBlank { "Help on the phone" }, kind = kind))
@@ -1701,6 +1754,28 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
                     val fallback = if (access.isDeclined(currentPkg)) Lines.AI_ERROR else Lines.CANNOT_SEE
                     say(reply.line.takeIf { it.text.isNotBlank() } ?: fallback)
                 } else {
+                    // No button on purpose: a confident spoken step such as "fill this form yourself".
+                    // No button by accident: a blank or unsure reply, which gets one retry.
+                    val noTarget = reply.targetElement == null && (reply.gesture == "tap" || reply.gesture == "none")
+                    val deliberateNoTarget = noTarget && reply.line.text.isNotBlank() &&
+                        reply.confidence >= GUIDE_ESCALATION_CONFIDENCE
+                    val noClearTarget = noTarget && !deliberateNoTarget
+                    if (words == null && noClearTarget) {
+                        // The first try plus one retry (the screenshot below), then Saathi waits.
+                        if (autoStall.miss()) {
+                            pauseAutoSteps()
+                            return
+                        }
+                    } else if (reply.targetElement != null) {
+                        autoStall.reset()
+                    }
+                    if (deliberateNoTarget) {
+                        // She is typing on this page (a form, say). Screen changes from her typing
+                        // must not start new steps; she asks, or moves to a new page, to go on.
+                        showStep(reply, snapshot, outcome.setsTargetLabel)
+                        autoStall.hold()
+                        return
+                    }
                     // Auto-escalate to Hydrogen + compressed screenshot when a DOM-only guide_step
                     // returned low confidence (< 0.75) or no clear target on a full readable screen.
                     val needsVisionEscalation = !lastSentWithScreenshot &&
@@ -1708,8 +1783,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
                         !Allowlist.isLauncher(snapshot.pkg) &&
                         Allowlist.tier(snapshot.pkg) == Allowlist.Tier.ALLOWED &&
                         ++followUps <= MAX_FOLLOW_UPS &&
-                        (reply.confidence < GUIDE_ESCALATION_CONFIDENCE ||
-                            (reply.targetElement == null && (reply.gesture == "tap" || reply.gesture == "none")))
+                        (reply.confidence < GUIDE_ESCALATION_CONFIDENCE || noClearTarget)
                     if (needsVisionEscalation) {
                         Log.i(TAG, "DOM-only guide_step returned confidence=${reply.confidence} target=${reply.targetElement}; escalating with screenshot")
                         sendTurn(words, forceScreenshot = true)
@@ -1842,6 +1916,26 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         deferredForLoading = false
     }
 
+    /**
+     * The last try of a turn failed. Her own question gets the usual "one second" line. An
+     * automatic step stops here instead of starting again on the next screen change.
+     */
+    private fun turnFailed(words: String?) {
+        if (words == null && guiding) {
+            autoStall.failed()
+            pauseAutoSteps()
+        } else {
+            say(Lines.RETRY_FAILED)
+        }
+    }
+
+    private fun pauseAutoSteps() {
+        Log.i(TAG, "Automatic steps paused on ${currentPkg}: no clear step after ${AutoStall.MAX_ATTEMPTS} tries")
+        main.removeCallbacks(settle)
+        stopPointing()
+        sayThenListen(Lines.PAGE_UNCLEAR)
+    }
+
     private fun stopPointing() {
         generation++
         gemini.cancel()
@@ -1867,6 +1961,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     // Goal, history and expiry
 
     private fun startGoal(goal: Goal) {
+        autoStall.reset()
         accessEnded(access.reset(), "new_goal")
         guide = null
         state.goal = goal.copy(status = SessionState.ACTIVE, step = 0)
@@ -1877,6 +1972,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     }
 
     private fun expireGoal() {
+        autoStall.reset()
         // Access to an ask-first app lasts no longer than the goal, and a Nahi is forgotten with it.
         accessEnded(access.reset(), "goal_ended")
         guide = null
@@ -1920,7 +2016,7 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     private fun scheduleSettle() {
         deferredForLoading = false
         main.removeCallbacks(settle)
-        main.postDelayed(settle, SETTLE_MS)
+        main.postDelayed(settle, TurnPolicy.settleMs(clickedSinceSettle))
     }
 
     private fun onScreenSettled() {
@@ -1970,6 +2066,13 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         val label = targetLabel
         val targetStillThere = label != null && snapshot.find(label) != null
         val appChanged = pkgAtLastTurn != null && snapshot.pkg != pkgAtLastTurn
+
+        // Paused after two failed tries, or after a step with no button (a form she fills herself):
+        // wait for her words, a new app or a clearly new page. Her typing, her taps inside the
+        // form and a WebView's text changing by itself do not count, or the loop would start again.
+        if (autoStall.paused) {
+            if (appChanged || overlap < NEW_PAGE) autoStall.reset() else return
+        }
 
         // A tap she made or a foreground app change counts as progress unless the screen stayed the same.
         val sameScreen = !appChanged && (if (clicked) overlap >= NEARLY_IDENTICAL else overlap >= SAME_SCREEN)
@@ -2232,12 +2335,11 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
     private companion object {
         const val TICK_MS = 500L
         const val SCAN_GAP_MS = 800L
-        const val SETTLE_MS = 750L
         const val LOADING_DEFER_MS = 500L
-        const val LLM_TIMEOUT_MS = 6000L
         const val PACK_RETRY_MS = 10 * 60_000L
         const val SUBGOAL_HANDOFF_MS = 90_000L
-        const val MIN_CALL_GAP_MS = 1500L
+        const val MIN_CALL_GAP_MS = 800L
+        const val BANK_VOICE_GOAL = "Answer her banking question by voice only. Saathi is off for bank safety and cannot see any screen."
         const val WAITING_MS = 30_000L
         const val IDLE_END_MS = 5 * 60_000L
         const val AUTO_CLOSE_MS = 12_000L
@@ -2249,6 +2351,8 @@ class Assistant(private val context: Context) : OverlayController.Callbacks, Voi
         const val MIN_CONFIDENCE = 0.6
         const val GUIDE_ESCALATION_CONFIDENCE = 0.75
         const val SAME_SCREEN = 0.6
+        /** Below this overlap with the paused page, she has clearly moved to a new page. */
+        const val NEW_PAGE = 0.3
         const val NEARLY_IDENTICAL = 0.92
         const val UNHIDE_AFTER_MS = 1000L
         const val ORDINARY_SCREEN_BUTTONS = 3
